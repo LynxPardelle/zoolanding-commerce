@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: Local-only scaffold for the Zoolanding Commerce service.
+Description: Local-only storage foundation for the Zoolanding Commerce service.
 
 Parameters:
   EnvironmentName:
@@ -17,14 +17,104 @@ Globals:
     MemorySize: 256
     Timeout: 10
 
-Conditions:
-  IsTestEnvironment: !Equals [!Ref EnvironmentName, test]
-
 Resources:
-  LocalOnlyScaffold:
-    Type: AWS::CloudFormation::WaitConditionHandle
+  CommerceCatalogTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      Tags:
+        - Key: Project
+          Value: Zoolandingpage
+        - Key: Component
+          Value: CommerceCatalog
+        - Key: ManagedBy
+          Value: SAM
+        - Key: Environment
+          Value:
+            Ref: EnvironmentName
 
-Outputs:
-  ImplementationState:
-    Description: This scaffold cannot be deployed until the Phase 3 release gate is removed.
-    Value: !If [IsTestEnvironment, local-only, local-only]
+  CommerceOperationsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      Tags:
+        - Key: Project
+          Value: Zoolandingpage
+        - Key: Component
+          Value: CommerceOperations
+        - Key: ManagedBy
+          Value: SAM
+        - Key: Environment
+          Value:
+            Ref: EnvironmentName
+
+  FiscalTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      Tags:
+        - Key: Project
+          Value: Zoolandingpage
+        - Key: Component
+          Value: CommerceFiscal
+        - Key: ManagedBy
+          Value: SAM
+        - Key: Environment
+          Value:
+            Ref: EnvironmentName
