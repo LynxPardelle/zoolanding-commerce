@@ -2,7 +2,7 @@
 
 Generic server-only commercial state for draft-configured catalogs, immutable offers, inventory, orders, subscriptions, fulfillment, migration requests, and isolated manual fiscal requests.
 
-Phase 3 is local-only. `TASK-025` establishes the repository boundary and immutable published-policy resolver; `TASK-026` adds only the storage resources described below. There is no AWS `dev` environment, and the test/production workflows fail closed until the remaining Phase 3 handlers, authorization, tests, and deployment gates are complete and explicitly approved.
+Phase 3 is local-only. `TASK-025` establishes the repository boundary and immutable published-policy resolver, `TASK-026` adds only the storage resources, and `TASK-027` adds only the pure domain rules described below. There is no AWS `dev` environment, and the test/production workflows fail closed until the remaining Phase 3 handlers, authorization, tests, and deployment gates are complete and explicitly approved.
 
 ## Boundaries
 
@@ -36,6 +36,17 @@ The undeployed SAM template owns three draft-scoped storage boundaries:
 All three use on-demand billing, server-side encryption, point-in-time recovery, retained replacement/deletion policy, and server-owned `pk`/`sk` keys. Catalog and Operations enable `expiresAt` TTL for eligible cleanup records only; Fiscal has no TTL until its approved retention policy exists. Only Operations enables a `NEW_IMAGE` DynamoDB Stream.
 
 Stream filtering, partial-batch responses, the failure destination, Lambda IAM, and catalog/fiscal handler isolation require an event-source mapping and real consumers. They remain in `TASK-030` and `TASK-032`; this task does not add placeholder Lambdas, queues, APIs, roles, or indexes.
+
+## Domain Foundation
+
+The pure `src/domain/` modules keep the first code-owned invariants independent from transport and persistence:
+
+- exact sellable, shipping, fiscal-disclosure, and tax-behavior registries;
+- immutable non-negative integer minor-unit money whose uppercase three-letter ASCII currency must belong to an immutable server-resolved allowlist;
+- non-negative integer quantities and integer-only order line totals;
+- rejection of physical recurring offers.
+
+Every money value requires the owning provider/policy currency allowlist and fails closed when the selected code is absent. This layer deliberately does not add a stale ISO registry or silently normalize browser input. Offer versions, stock movements, orders, subscription workflows, fiscal fields, handlers, IAM, Stripe calls, and persistence remain in their later tasks.
 
 ## Local Verification
 
