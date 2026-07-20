@@ -1,0 +1,21 @@
+version = 0.1
+
+[test.deploy.parameters]
+stack_name = "zoolanding-commerce-test"
+resolve_s3 = true
+s3_prefix = "zoolanding-commerce-test"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = false
+fail_on_empty_changeset = false
+parameter_overrides = ["EnvironmentName=test"]
+
+[prod.deploy.parameters]
+stack_name = "zoolanding-commerce-prod"
+resolve_s3 = true
+s3_prefix = "zoolanding-commerce-prod"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = false
+fail_on_empty_changeset = false
+parameter_overrides = ["EnvironmentName=prod"]

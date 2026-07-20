@@ -1,0 +1,18 @@
+name: Deploy Production
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  release-gate:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Keep production deployment disabled during local Phase 3
+        run: |
+          echo "Commerce production deployment is blocked until test evidence and explicit release approval exist."
+          exit 1

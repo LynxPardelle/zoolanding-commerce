@@ -1,0 +1,30 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Local-only scaffold for the Zoolanding Commerce service.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    AllowedValues:
+      - test
+      - prod
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Architectures:
+      - arm64
+    MemorySize: 256
+    Timeout: 10
+
+Conditions:
+  IsTestEnvironment: !Equals [!Ref EnvironmentName, test]
+
+Resources:
+  LocalOnlyScaffold:
+    Type: AWS::CloudFormation::WaitConditionHandle
+
+Outputs:
+  ImplementationState:
+    Description: This scaffold cannot be deployed until the Phase 3 release gate is removed.
+    Value: !If [IsTestEnvironment, local-only, local-only]

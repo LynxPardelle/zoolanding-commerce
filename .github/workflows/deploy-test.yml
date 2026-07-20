@@ -1,0 +1,18 @@
+name: Deploy Test
+
+on:
+  push:
+    branches: [test]
+
+permissions:
+  contents: read
+
+jobs:
+  release-gate:
+    runs-on: ubuntu-latest
+    environment: test
+    steps:
+      - name: Keep test deployment disabled during local Phase 3
+        run: |
+          echo "Commerce deployment is blocked until TASK-026 through TASK-034 and the test release gates pass."
+          exit 1
