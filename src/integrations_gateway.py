@@ -239,6 +239,25 @@ class InternalIntegrationsGateway:
             snapshot=discount.provider_snapshot(),
         )
 
+    def update_discount_presentation(
+        self, scope: CommerceScope, connection_id: str, discount: DiscountVersion
+    ) -> dict[str, str]:
+        if type(discount) is not DiscountVersion or discount.display_name is None:
+            raise IntegrationsConflict("Discount presentation is not provider-ready")
+        snapshot: dict[str, Any] = {"displayName": discount.display_name}
+        if discount.display_description is not None:
+            snapshot["displayDescription"] = discount.display_description
+        return self._snapshot_command(
+            "/internal/v1/stripe/discount",
+            scope,
+            connection_id,
+            resource_id=discount.version_id,
+            revision=discount.presentation_revision,
+            operation="discount-presentation",
+            snapshot=snapshot,
+            input_operation="presentation",
+        )
+
     def update_discount_lifecycle(
         self, scope: CommerceScope, connection_id: str, discount: DiscountVersion
     ) -> dict[str, str]:
@@ -331,12 +350,14 @@ class InternalIntegrationsGateway:
         path, identity_operation = selected
         input_copy = _plain_mapping(command_input)
         if operation == "openPortal":
-            technical_key = "integrations-portal-v1:" + canonical_hash({
-                "scope": _scope_fields(scope),
-                "connectionId": connection_id,
-                "subscriptionId": input_copy.get("subscriptionId"),
-                "sourceKeyHash": hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest(),
-            })
+            technical_key = _derived_idempotency(
+                scope,
+                connection_id,
+                identity_operation,
+                input_copy.get("subscriptionId"),
+                1,
+                hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest(),
+            )
             payload = _command_envelope(
                 scope, connection_id, input_copy, idempotency_key=technical_key
             )
@@ -384,6 +405,7 @@ class InternalIntegrationsGateway:
         operation: str,
         snapshot: Mapping[str, Any],
         include_operation: bool = False,
+        input_operation: str | None = None,
     ) -> dict[str, str]:
         snapshot_value = _plain_mapping(snapshot)
         content_hash = canonical_hash({"schemaVersion": 1, "snapshot": snapshot_value})
@@ -396,6 +418,8 @@ class InternalIntegrationsGateway:
         }
         if include_operation:
             command_input["operation"] = operation
+        elif input_operation is not None:
+            command_input["operation"] = input_operation
         payload = _command_envelope(
             scope,
             connection_id,

@@ -26,6 +26,10 @@ class CatalogPhase4Store:
         self.calls.append(("get_discount_version", scope, version_id, supported_currencies))
         return self.discount
 
+    def replay_mutation(self, scope, idempotency_key, request):
+        self.calls.append(("replay_mutation", scope, idempotency_key, request))
+        return None
+
     def advance_offer_lifecycle(self, scope, version_id, target_state, expected_revision, currencies, **metadata):
         self.sequence.append("store")
         self.calls.append(("advance_offer_lifecycle", scope, version_id, target_state, expected_revision, currencies, metadata))
@@ -41,10 +45,16 @@ class CatalogPhase4Store:
         self.calls.append(("advance_discount_lifecycle", scope, version_id, target_state, expected_revision, currencies, metadata))
         return {"versionId": version_id, "lifecycleState": target_state, "lifecycleRevision": expected_revision + 1}
 
+    def update_discount_presentation(self, scope, version_id, expected_revision, currencies, **metadata):
+        self.sequence.append("store")
+        self.calls.append(("update_discount_presentation", scope, version_id, expected_revision, currencies, metadata))
+        return {"versionId": version_id, "presentationRevision": expected_revision + 1}
+
 
 class CatalogPhase4Gateway:
-    def __init__(self, *, status="accepted", sequence=None):
+    def __init__(self, *, status="accepted", sequence=None, error=None):
         self.status = status
+        self.error = error
         self.calls = []
         self.sequence = sequence if sequence is not None else []
 
@@ -72,6 +82,13 @@ class CatalogPhase4Gateway:
         self.sequence.append("gateway")
         self.calls.append(("update_discount_lifecycle", scope, connection_id, discount))
         return {"commandId": "command-discount-state", "status": self.status}
+
+    def update_discount_presentation(self, scope, connection_id, discount):
+        self.sequence.append("gateway")
+        self.calls.append(("update_discount_presentation", scope, connection_id, discount))
+        if self.error is not None:
+            raise self.error
+        return {"commandId": "command-discount-presentation", "status": self.status}
 
 
 class CheckoutCatalog:
@@ -187,6 +204,143 @@ class CatalogIntegrationsWiringTests(unittest.TestCase):
         })
         self.assertFalse(any(call[0] == "advance_offer_lifecycle" for call in store.calls))
 
+    def test_exact_offer_activation_retry_replays_before_revision_or_provider_checks(self):
+        from src.catalog_storage import CatalogStore
+        from src.domain.catalog import CatalogItem
+        from src.domain.offers import Money, OfferVersion
+        from src.storage import CommerceScope
+        from tests.test_catalog_handlers import FakeCatalogBackend
+
+        backend = FakeCatalogBackend()
+        store = CatalogStore(backend, "Catalog", "Operations")
+        scope = CommerceScope("test", "tenant-example", "draft-example", "example.com")
+        metadata = {
+            "request_id": "seed-request",
+            "correlation_id": "seed-request",
+            "actor_hash": "a" * 64,
+            "now_epoch": 1_799_999_900,
+        }
+        store.create_item(
+            scope,
+            CatalogItem("item-1", "service"),
+            idempotency_key="seed-item",
+            **metadata,
+        )
+        store.create_offer(
+            scope,
+            OfferVersion(
+                "offer-1",
+                "item-1",
+                None,
+                3,
+                "service",
+                Money(90_000, "MXN", frozenset({"MXN"})),
+                "exclusive",
+                display_name="Servicio",
+            ),
+            supported_currencies=frozenset({"MXN"}),
+            idempotency_key="seed-offer",
+            **metadata,
+        )
+        store.advance_offer_lifecycle(
+            scope,
+            "offer-1",
+            "provisioning",
+            1,
+            frozenset({"MXN"}),
+            idempotency_key="seed-provisioning",
+            **metadata,
+        )
+        gateway = CatalogPhase4Gateway()
+        payload = {
+            "operation": "advanceOfferLifecycle",
+            "input": {
+                "versionId": "offer-1",
+                "targetState": "active",
+                "expectedRevision": 2,
+            },
+        }
+
+        first = self.invoke(payload, store, gateway)
+        replay = self.invoke(payload, store, gateway)
+
+        self.assertEqual(first["statusCode"], 200, first["body"])
+        self.assertEqual(replay, first)
+        self.assertEqual(
+            [call[0] for call in gateway.calls],
+            ["provision_offer", "update_offer_presentation"],
+        )
+
+    def test_all_provider_backed_catalog_replays_short_circuit_revision_and_gateway_checks(self):
+        cases = (
+            (
+                "advanceOfferLifecycle",
+                {"versionId": "offer-1", "targetState": "active", "expectedRevision": 2},
+                {
+                    "action": "advanceOfferLifecycle",
+                    "versionId": "offer-1",
+                    "targetState": "active",
+                    "expectedRevision": 2,
+                },
+            ),
+            (
+                "updateOfferPresentation",
+                {"versionId": "offer-1", "expectedRevision": 3, "displayName": "Oferta"},
+                {
+                    "action": "updateOfferPresentation",
+                    "versionId": "offer-1",
+                    "expectedRevision": 3,
+                    "displayName": "Oferta",
+                    "displayDescription": None,
+                },
+            ),
+            (
+                "advanceDiscountLifecycle",
+                {"versionId": "discount-1", "targetState": "active", "expectedRevision": 2},
+                {
+                    "action": "advanceDiscountLifecycle",
+                    "versionId": "discount-1",
+                    "targetState": "active",
+                    "expectedRevision": 2,
+                },
+            ),
+            (
+                "updateDiscountPresentation",
+                {
+                    "versionId": "discount-1",
+                    "expectedRevision": 4,
+                    "displayName": "Promoción",
+                    "displayDescription": "Beneficio",
+                },
+                {
+                    "action": "updateDiscountPresentation",
+                    "versionId": "discount-1",
+                    "expectedRevision": 4,
+                    "displayName": "Promoción",
+                    "displayDescription": "Beneficio",
+                },
+            ),
+        )
+        for operation, input_value, expected_request in cases:
+            with self.subTest(operation=operation):
+                replay = {"versionId": input_value["versionId"], "replayed": True}
+                store = CatalogPhase4Store()
+                store.replay_mutation = Mock(return_value=replay)
+                gateway = CatalogPhase4Gateway()
+
+                response = self.invoke(
+                    {"operation": operation, "input": input_value},
+                    store,
+                    gateway,
+                )
+
+                self.assertEqual(response["statusCode"], 200, response["body"])
+                self.assertEqual(response_body(response)["data"], replay)
+                store.replay_mutation.assert_called_once()
+                self.assertEqual(store.replay_mutation.call_args.args[2], expected_request)
+                self.assertEqual(gateway.calls, [])
+                self.assertFalse(any(call[0].startswith("get_") for call in store.calls))
+
     def test_offer_retirement_and_presentation_use_their_exact_provider_seams(self):
         from src.domain.offers import Money, OfferVersion
 
@@ -231,6 +385,7 @@ class CatalogIntegrationsWiringTests(unittest.TestCase):
         current = DiscountVersion(
             "discount-1", 2, "once", percentage_basis_points=1_000,
             lifecycle_state="provisioning", lifecycle_revision=2,
+            display_name="Promoción",
         )
         store = CatalogPhase4Store(discount=current)
         gateway = CatalogPhase4Gateway()
@@ -241,6 +396,7 @@ class CatalogIntegrationsWiringTests(unittest.TestCase):
         self.assertEqual(active["statusCode"], 200)
         self.assertEqual(gateway.calls[0][0], "provision_discount")
         self.assertEqual(gateway.calls[0][-1].provider_snapshot(), current.provider_snapshot())
+        self.assertEqual(gateway.calls[1][0], "update_discount_presentation")
 
         existing = DiscountVersion(
             "discount-1", 2, "once", percentage_basis_points=1_000,
@@ -254,6 +410,110 @@ class CatalogIntegrationsWiringTests(unittest.TestCase):
         }, state_store, state_gateway)
         self.assertEqual(response_body(held)["data"]["status"], "needs_review")
         self.assertFalse(any(call[0] == "advance_discount_lifecycle" for call in state_store.calls))
+
+    def test_active_discount_presentation_reaches_integrations_before_local_success(self):
+        from src.domain.offers import DiscountVersion
+
+        sequence = []
+        current = DiscountVersion(
+            "discount-1",
+            2,
+            "once",
+            percentage_basis_points=1_000,
+            lifecycle_state="active",
+            lifecycle_revision=3,
+            presentation_revision=2,
+            display_name="Anterior",
+        )
+        store = CatalogPhase4Store(discount=current, sequence=sequence)
+        gateway = CatalogPhase4Gateway(sequence=sequence)
+
+        response = self.invoke({
+            "operation": "updateDiscountPresentation",
+            "input": {
+                "versionId": "discount-1",
+                "expectedRevision": 2,
+                "displayName": "Nueva promoción",
+                "displayDescription": "Descripción segura",
+            },
+        }, store, gateway)
+
+        self.assertEqual(response["statusCode"], 200, response["body"])
+        self.assertEqual(sequence, ["gateway", "store"])
+        forwarded = gateway.calls[0][-1]
+        self.assertEqual(
+            (forwarded.presentation_revision, forwarded.display_name),
+            (3, "Nueva promoción"),
+        )
+
+    def test_nonaccepted_discount_presentation_never_persists_local_success(self):
+        from src.domain.offers import DiscountVersion
+
+        current = DiscountVersion(
+            "discount-1",
+            2,
+            "once",
+            percentage_basis_points=1_000,
+            lifecycle_state="active",
+            lifecycle_revision=3,
+            presentation_revision=2,
+            display_name="Anterior",
+        )
+        for status in ("pending", "needs_review"):
+            with self.subTest(status=status):
+                store = CatalogPhase4Store(discount=current)
+                gateway = CatalogPhase4Gateway(status=status)
+
+                response = self.invoke({
+                    "operation": "updateDiscountPresentation",
+                    "input": {
+                        "versionId": "discount-1",
+                        "expectedRevision": 2,
+                        "displayName": "Nueva promoción",
+                    },
+                }, store, gateway)
+
+                self.assertEqual(response_body(response)["data"], {
+                    "commandId": "command-discount-presentation",
+                    "status": status,
+                })
+                self.assertFalse(
+                    any(call[0] == "update_discount_presentation" for call in store.calls)
+                )
+
+    def test_failed_discount_presentation_never_persists_local_success(self):
+        from src.domain.offers import DiscountVersion
+        from src.integrations_gateway import IntegrationsUnavailable
+
+        current = DiscountVersion(
+            "discount-1",
+            2,
+            "once",
+            percentage_basis_points=1_000,
+            lifecycle_state="active",
+            lifecycle_revision=3,
+            presentation_revision=2,
+            display_name="Anterior",
+        )
+        store = CatalogPhase4Store(discount=current)
+        gateway = CatalogPhase4Gateway(
+            error=IntegrationsUnavailable("provider detail must not escape")
+        )
+
+        response = self.invoke({
+            "operation": "updateDiscountPresentation",
+            "input": {
+                "versionId": "discount-1",
+                "expectedRevision": 2,
+                "displayName": "Nueva promoción",
+            },
+        }, store, gateway)
+
+        self.assertEqual(response["statusCode"], 503)
+        self.assertNotIn("provider detail", response["body"])
+        self.assertFalse(
+            any(call[0] == "update_discount_presentation" for call in store.calls)
+        )
 
 
 @patch.dict(

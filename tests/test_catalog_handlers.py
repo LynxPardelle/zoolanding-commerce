@@ -145,6 +145,10 @@ class HandlerStore:
             lifecycle_revision=2,
         )
 
+    def replay_mutation(self, scope, idempotency_key, request):
+        self.calls.append(("replay_mutation", scope, idempotency_key, request))
+        return None
+
     def adjust_stock(self, *args, **kwargs):
         self.calls.append(("adjust_stock", args, kwargs))
         return {"action": "adjust", "revision": 1}
@@ -345,6 +349,27 @@ class CatalogHandlerContractTests(unittest.TestCase):
         )
         self.assertEqual(transition_replay, transitioned)
         self.assertEqual(len(backend.transactions), transaction_count)
+
+        replay_request = {
+            "action": "advanceOfferLifecycle",
+            "versionId": "offer-1",
+            "targetState": "provisioning",
+            "expectedRevision": 1,
+        }
+        self.assertEqual(
+            store.replay_mutation(
+                scope,
+                "transition-offer",
+                replay_request,
+            ),
+            transitioned,
+        )
+        with self.assertRaises(StorageConflict):
+            store.replay_mutation(
+                scope,
+                "transition-offer",
+                {**replay_request, "targetState": "active"},
+            )
 
     def test_offer_and_discount_revision_dimensions_cannot_overwrite_each_other(self):
         from src.catalog_storage import CatalogStore

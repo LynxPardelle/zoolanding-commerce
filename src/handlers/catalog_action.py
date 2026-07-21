@@ -103,6 +103,15 @@ def _handle(event: dict[str, Any], payload: dict[str, Any], request_id: str) -> 
     }
     scope = resolved_scope(policies)
     store = _store()
+    replay = _catalog_mutation_replay(
+        store,
+        scope,
+        operation,
+        input_value,
+        idempotency_key,
+    )
+    if replay is not None:
+        return replay
     connection_id = safe_id(commerce.get("payments", {}).get("bindingId"))
 
     if operation == "createItem":
@@ -240,6 +249,15 @@ def _handle(event: dict[str, Any], payload: dict[str, Any], request_id: str) -> 
             )
             if result["status"] != "accepted":
                 return result
+            if updated.display_name is not None:
+                result = _gateway_call(
+                    gateway.update_discount_presentation,
+                    scope,
+                    connection_id,
+                    updated,
+                )
+                if result["status"] != "accepted":
+                    return result
         elif updated.lifecycle_state in {"existing_only", "retired"}:
             gateway = _configured_gateway()
             result = _gateway_call(
@@ -258,6 +276,31 @@ def _handle(event: dict[str, Any], payload: dict[str, Any], request_id: str) -> 
             currencies,
             **metadata,
         )
+    current = store.get_discount_version(
+        scope, input_value["versionId"], currencies
+    )
+    if current.presentation_revision != input_value["expectedRevision"]:
+        raise _conflict()
+    try:
+        updated = current.with_presentation(
+            input_value["expectedRevision"] + 1,
+            display_name=input_value.get("displayName"),
+            display_description=input_value.get("displayDescription"),
+        )
+    except ValueError:
+        raise _conflict() from None
+    if current.lifecycle_state in {"active", "existing_only"}:
+        gateway = _configured_gateway()
+        result = _gateway_call(
+            gateway.update_discount_presentation,
+            scope,
+            connection_id,
+            updated,
+        )
+        if result["status"] != "accepted":
+            return result
+    elif current.lifecycle_state == "retired":
+        raise _conflict()
     return store.update_discount_presentation(
         scope,
         input_value["versionId"],
@@ -461,6 +504,35 @@ def _display_fields(value: dict[str, Any]) -> None:
 
 def _store() -> CatalogStore:
     return CatalogStore.from_environment(mutations=True)
+
+
+def _catalog_mutation_replay(
+    store: CatalogStore,
+    scope: Any,
+    operation: str,
+    input_value: dict[str, Any],
+    idempotency_key: str,
+) -> dict[str, Any] | None:
+    if operation not in {
+        "advanceOfferLifecycle",
+        "updateOfferPresentation",
+        "advanceDiscountLifecycle",
+        "updateDiscountPresentation",
+    }:
+        return None
+    request: dict[str, Any] = {
+        "action": operation,
+        "versionId": input_value["versionId"],
+        "expectedRevision": input_value["expectedRevision"],
+    }
+    if operation in {"advanceOfferLifecycle", "advanceDiscountLifecycle"}:
+        request["targetState"] = input_value["targetState"]
+    else:
+        request.update({
+            "displayName": input_value.get("displayName"),
+            "displayDescription": input_value.get("displayDescription"),
+        })
+    return store.replay_mutation(scope, idempotency_key, request)
 
 
 def _gateway() -> InternalIntegrationsGateway:

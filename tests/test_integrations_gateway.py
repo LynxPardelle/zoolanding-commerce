@@ -268,6 +268,59 @@ class IntegrationsGatewayContractTests(unittest.TestCase):
         self.assertEqual(payload["idempotencyKey"], expected_key)
         self.assertRegex(payload["commandId"], r"^command-[a-f0-9]{40}$")
 
+    def test_discount_presentation_uses_its_exact_operation_revision_hash_and_route(self):
+        from src.domain.offers import DiscountVersion
+        from src.integrations_gateway import InternalIntegrationsGateway, canonical_hash
+
+        transport = RecordingTransport(
+            lambda payload: {"commandId": payload["commandId"], "status": "accepted"}
+        )
+        discount = DiscountVersion(
+            "discount-1",
+            2,
+            "once",
+            percentage_basis_points=1_000,
+            lifecycle_state="active",
+            lifecycle_revision=3,
+            presentation_revision=4,
+            display_name="Descuento recurrente",
+            display_description="Beneficio del plan",
+        )
+
+        result = InternalIntegrationsGateway(transport).update_discount_presentation(
+            SCOPE,
+            CONNECTION_ID,
+            discount,
+        )
+
+        self.assertEqual(result["status"], "accepted")
+        method, path, payload = transport.calls[0]
+        self.assertEqual((method, path), ("POST", "/internal/v1/stripe/discount"))
+        snapshot = {
+            "displayName": "Descuento recurrente",
+            "displayDescription": "Beneficio del plan",
+        }
+        content_hash = canonical_hash({"schemaVersion": 1, "snapshot": snapshot})
+        self.assertEqual(payload["input"], {
+            "resourceId": "discount-1",
+            "revision": 4,
+            "schemaVersion": 1,
+            "snapshot": snapshot,
+            "contentHash": content_hash,
+            "operation": "presentation",
+        })
+        self.assertEqual(
+            payload["idempotencyKey"],
+            "integrations-command-v1:" + canonical_hash({
+                "scope": payload["scope"],
+                "connectionId": CONNECTION_ID,
+                "operation": "discount-presentation",
+                "resourceId": "discount-1",
+                "revision": 4,
+                "contentHash": content_hash,
+            }),
+        )
+
     def test_checkout_and_status_commands_are_closed_and_never_return_provider_ids(self):
         from src.integrations_gateway import InternalIntegrationsGateway, IntegrationsUnavailable
 
@@ -328,7 +381,7 @@ class IntegrationsGatewayContractTests(unittest.TestCase):
             InternalIntegrationsGateway(bad).create_checkout(SCOPE, CONNECTION_ID, checkout_input)
 
     def test_subscription_commands_use_exact_routes_and_accept_needs_review(self):
-        from src.integrations_gateway import InternalIntegrationsGateway
+        from src.integrations_gateway import InternalIntegrationsGateway, canonical_hash
 
         transport = RecordingTransport(
             lambda payload: {"commandId": payload["commandId"], "status": "needs_review"}
@@ -369,6 +422,20 @@ class IntegrationsGatewayContractTests(unittest.TestCase):
         )
         self.assertEqual(portal["status"], "accepted")
         self.assertEqual(portal_transport.calls[0][:2], ("POST", "/internal/v1/stripe/customer-portal"))
+        portal_payload = portal_transport.calls[0][2]
+        source_hash = hashlib.sha256(b"browser-key").hexdigest()
+        self.assertEqual(
+            portal_payload["idempotencyKey"],
+            "integrations-command-v1:" + canonical_hash({
+                "scope": portal_payload["scope"],
+                "connectionId": CONNECTION_ID,
+                "operation": "customer-portal",
+                "resourceId": "subscription-1",
+                "revision": 1,
+                "contentHash": source_hash,
+            }),
+        )
+        self.assertNotIn("browser-key", repr(portal_payload))
 
 
 if __name__ == "__main__":

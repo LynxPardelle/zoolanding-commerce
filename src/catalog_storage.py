@@ -503,6 +503,28 @@ class CatalogStore:
             raise StorageNotFound("discount is not available")
         return discount
 
+    def replay_mutation(
+        self,
+        scope: CommerceScope,
+        idempotency_key: str,
+        request: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """Return an exact durable replay before provider-side preflight work."""
+
+        _scope(scope)
+        if not isinstance(request, Mapping):
+            raise ValueError("catalog mutation request is invalid")
+        digest = _idempotency_digest(idempotency_key)
+        request_hash = _hash_json(request)
+        existing = self.backend.get(
+            self._operations_table(),
+            scope.partition_key,
+            f"IDEMPOTENCY#{digest}",
+        )
+        if existing is None:
+            return None
+        return _validated_replay(existing, request_hash, scope)
+
     def get_public_offer(
         self,
         scope: CommerceScope,

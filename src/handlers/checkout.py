@@ -120,7 +120,7 @@ def _handle(event: dict[str, Any], payload: dict[str, Any], request_id: str) -> 
 
     resolved_lines: list[tuple[Any, int, str | None]] = []
     contains_physical = False
-    contains_recurring = False
+    recurring_count = 0
     for index, request_line in enumerate(parsed_lines):
         offer, item = catalog.get_checkout_offer(
             scope,
@@ -137,7 +137,7 @@ def _handle(event: dict[str, Any], payload: dict[str, Any], request_id: str) -> 
         else:
             if payments.get("subscriptions") is not True:
                 raise validation_error()
-            contains_recurring = True
+            recurring_count += 1
         stock_id = None
         if offer.sellable_type == "physical":
             contains_physical = True
@@ -145,8 +145,10 @@ def _handle(event: dict[str, Any], payload: dict[str, Any], request_id: str) -> 
                 raise validation_error()
             stock_id = _stock_id(item.item_id, offer.variant_id)
         resolved_lines.append((offer, request_line["quantity"], stock_id))
-    if contains_physical and contains_recurring:
+    if recurring_count > 1 or (contains_physical and recurring_count):
         raise validation_error()
+    if recurring_count == 1:
+        resolved_lines.sort(key=lambda entry: entry[0].recurrence is None)
 
     discount = None
     if discount_version_id is not None:

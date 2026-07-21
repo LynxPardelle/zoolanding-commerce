@@ -72,15 +72,22 @@ class FakeCheckoutGateway:
         }
 
 
-def offer_and_item(*, sellable_type="service", recurring=False, variant_id=None):
+def offer_and_item(
+    *,
+    sellable_type="service",
+    recurring=False,
+    variant_id=None,
+    version_id="offer-1",
+    item_id="item-1",
+):
     from src.domain.catalog import CatalogItem, CatalogVariant
     from src.domain.offers import Money, OfferRecurrence, OfferVersion
 
     variants = () if variant_id is None else (CatalogVariant(variant_id, "SKU-1"),)
     return (
         OfferVersion(
-            "offer-1",
-            "item-1",
+            version_id,
+            item_id,
             variant_id,
             1,
             sellable_type,
@@ -90,7 +97,7 @@ def offer_and_item(*, sellable_type="service", recurring=False, variant_id=None)
             lifecycle_state="active",
             lifecycle_revision=3,
         ),
-        CatalogItem("item-1", sellable_type, variants),
+        CatalogItem(item_id, sellable_type, variants),
     )
 
 
@@ -223,6 +230,147 @@ class CheckoutHandlerContractTests(unittest.TestCase):
         self.assertEqual(response["statusCode"], 200)
         order = commerce.calls[0][0][1]
         self.assertEqual(order.lines[0].stock_id, "item-1.blue")
+
+    def test_multiple_recurring_offers_fail_before_reservation_or_gateway(self):
+        from src.handlers import checkout
+
+        policies = resolved_policies()
+        policies.commerce["commerce"]["notificationPolicyIds"] = []
+        catalog = FakeCatalog({
+            "offer-plan-a": offer_and_item(
+                sellable_type="subscription",
+                recurring=True,
+                version_id="offer-plan-a",
+                item_id="item-plan-a",
+            ),
+            "offer-plan-b": offer_and_item(
+                sellable_type="subscription",
+                recurring=True,
+                version_id="offer-plan-b",
+                item_id="item-plan-b",
+            ),
+        })
+        commerce = FakeCommerce()
+        with (
+            patch.object(checkout, "resolve_checkout_policy", return_value=policies),
+            patch.object(checkout, "_catalog_store", return_value=catalog),
+            patch.object(checkout, "_commerce_store", return_value=commerce),
+            patch.object(checkout.time, "time", return_value=1_800_000_000),
+            patch.object(
+                checkout,
+                "_new_id",
+                side_effect=["order-1", "attempt-1", "reservation-1", "line-1", "line-2"],
+            ),
+        ):
+            response = checkout.lambda_handler(
+                checkout_event({
+                    "operation": "admitCheckout",
+                    "input": {
+                        "lines": [
+                            {"offerVersionId": "offer-plan-a", "quantity": 1},
+                            {"offerVersionId": "offer-plan-b", "quantity": 1},
+                        ],
+                    },
+                }),
+                None,
+            )
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(commerce.calls, [])
+        self.assertEqual(self.gateway.calls, [])
+
+    def test_recurring_primary_precedes_allowed_one_time_addons(self):
+        from src.handlers import checkout
+
+        policies = resolved_policies()
+        policies.commerce["commerce"]["notificationPolicyIds"] = []
+        catalog = FakeCatalog({
+            "offer-addon": offer_and_item(
+                sellable_type="add_on",
+                version_id="offer-addon",
+                item_id="item-addon",
+            ),
+            "offer-plan": offer_and_item(
+                sellable_type="subscription",
+                recurring=True,
+                version_id="offer-plan",
+                item_id="item-plan",
+            ),
+        })
+        commerce = FakeCommerce()
+        with (
+            patch.object(checkout, "resolve_checkout_policy", return_value=policies),
+            patch.object(checkout, "_catalog_store", return_value=catalog),
+            patch.object(checkout, "_commerce_store", return_value=commerce),
+            patch.object(checkout.time, "time", return_value=1_800_000_000),
+            patch.object(
+                checkout,
+                "_new_id",
+                side_effect=["order-1", "attempt-1", "reservation-1", "line-1", "line-2"],
+            ),
+        ):
+            response = checkout.lambda_handler(
+                checkout_event({
+                    "operation": "admitCheckout",
+                    "input": {
+                        "lines": [
+                            {"offerVersionId": "offer-addon", "quantity": 2},
+                            {"offerVersionId": "offer-plan", "quantity": 1},
+                        ],
+                    },
+                }),
+                None,
+            )
+
+        self.assertEqual(response["statusCode"], 200, response["body"])
+        self.assertEqual(len(commerce.calls), 1)
+        self.assertEqual(len(self.gateway.calls), 1)
+        self.assertEqual(
+            [binding["offerVersionId"] for binding in self.gateway.calls[0][2]["offerBindings"]],
+            ["offer-plan", "offer-addon"],
+        )
+
+    def test_physical_and_recurring_cart_fails_before_reservation_or_gateway(self):
+        from src.handlers import checkout
+
+        policies = resolved_policies()
+        policies.commerce["commerce"]["notificationPolicyIds"] = []
+        catalog = FakeCatalog({
+            "offer-physical": offer_and_item(
+                sellable_type="physical",
+                variant_id="blue",
+                version_id="offer-physical",
+                item_id="item-physical",
+            ),
+            "offer-plan": offer_and_item(
+                sellable_type="subscription",
+                recurring=True,
+                version_id="offer-plan",
+                item_id="item-plan",
+            ),
+        })
+        commerce = FakeCommerce()
+        with (
+            patch.object(checkout, "resolve_checkout_policy", return_value=policies),
+            patch.object(checkout, "_catalog_store", return_value=catalog),
+            patch.object(checkout, "_commerce_store", return_value=commerce),
+        ):
+            response = checkout.lambda_handler(
+                checkout_event({
+                    "operation": "admitCheckout",
+                    "input": {
+                        "lines": [
+                            {"offerVersionId": "offer-physical", "quantity": 1},
+                            {"offerVersionId": "offer-plan", "quantity": 1},
+                        ],
+                    },
+                }),
+                None,
+            )
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(commerce.calls, [])
+        self.assertEqual(self.gateway.calls, [])
 
     def test_missing_physical_shipping_policy_fails_before_reservation(self):
         from src.handlers import checkout
