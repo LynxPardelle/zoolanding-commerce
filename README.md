@@ -2,7 +2,7 @@
 
 Generic server-only commercial state for draft-configured catalogs, immutable offers, inventory, orders, subscriptions, fulfillment, migration requests, and isolated manual fiscal requests.
 
-Phase 3 is local-only. `TASK-025` establishes the repository boundary and immutable published-policy resolver, `TASK-026` adds only the storage resources, `TASK-027` adds the first pure domain rules, and `TASK-028` adds the immutable catalog/offer/discount contract described below. There is no AWS `dev` environment, and the test/production workflows fail closed until the remaining Phase 3 handlers, authorization, tests, and deployment gates are complete and explicitly approved.
+Phase 3 is local-only. `TASK-025` establishes the repository boundary and immutable published-policy resolver, `TASK-026` adds only the storage resources, `TASK-027` adds the first pure domain rules, `TASK-028` adds the immutable catalog/offer/discount contract, and `TASK-029` adds the conditional inventory transaction contract described below. There is no AWS `dev` environment, and the test/production workflows fail closed until the remaining Phase 3 handlers, authorization, tests, and deployment gates are complete and explicitly approved.
 
 ## Boundaries
 
@@ -52,7 +52,23 @@ The pure `src/domain/` modules keep the first code-owned invariants independent 
 
 Every money value requires the owning provider/policy currency allowlist and fails closed when the selected code is absent. This layer deliberately does not add a stale ISO registry or silently normalize browser input. Customer-facing discount code casing remains part of the immutable restriction fingerprint; TASK-041 will derive a separate case-folded lookup key to enforce active-code uniqueness. Data Spaces references contain identifiers only: the future authorized activation handler must derive environment/tenant/draft/domain from trusted policy, obtain and validate the allowlisted internal snapshot, and persist that snapshot before an offer becomes buyable. Constructors support trusted rehydration; future mutation handlers must load current server state, enforce bounded request/cardinality/provider limits, and apply revision/transition helpers with conditional persistence rather than accepting browser lifecycle values.
 
-Stock movements, orders, subscription workflows, fiscal fields, handlers, IAM, Data Spaces calls, Stripe mappings/calls, and persistence remain in their later tasks. TASK-028 adds no network operation, dependency, credential, PII, provider payload, or AWS resource.
+Subscription workflows, fiscal fields, handlers, IAM, Data Spaces calls, Stripe mappings/calls, and deployment remain in their later tasks. The catalog/offer layer adds no network operation, credential, PII, provider payload, or AWS resource.
+
+## Inventory Transactions
+
+`src/domain/inventory.py`, `src/domain/orders.py`, and `src/storage.py` implement the local TASK-029 contract:
+
+- tracked stock keeps exact integer `onHand = available + reserved` state and a conditional revision; untracked lines create no stock mutation;
+- a positive adjustment from expected revision zero initializes tracked stock, while later positive or negative adjustments cannot consume reserved stock;
+- reservation aggregates lines by stock target, then creates stock updates, immutable movements, the Catalog reservation/due marker, Operations order, scoped PaymentAttempt binding, and 90-day idempotency receipt in one cross-table transaction;
+- a Checkout accepts at most 20 distinct immutable OfferVersions; 20 distinct tracked targets produce 45 unique actions, validated with the complete serialized plan before DynamoDB is called;
+- `reservationCreatedAt`, `checkoutExpiresAt = created + 2,100 seconds`, and the initial reconciliation time `expires + 300 seconds` use one injected server timestamp;
+- commit and release update stock, reservation, due marker, and order atomically, are mutually exclusive, and require a closed canonical completion reason; refund is not a stock transition;
+- timeout, network, throttling, `5xx`, and unknown provider results classify as hold/retry/reconcile, never release; a missing response is reconciled through the durable receipt before an outcome is returned;
+- uncertain due reservations move their draft-scoped marker forward by exactly five minutes, so one unresolved item cannot indefinitely hide later items; no scan or TTL acts as a commercial timer;
+- environment, tenant, and draft prefix every key, and the short DynamoDB client token is derived from both that scope and the exact transaction plan.
+
+TASK-030 still owns handlers, fresh authorization/CSRF, least-privilege IAM, the five-minute scheduler, published-scope enumeration, alarms, and API routes. TASK-040 still owns the exact internal provider-status call and adapter evidence mapping. No Lambda, route, role, schedule, provider client, dependency, AWS deployment, credential, customer PII, or provider payload was added in TASK-029.
 
 ## Local Verification
 
