@@ -2,7 +2,7 @@
 
 Generic server-only commercial state for draft-configured catalogs, immutable offers, inventory, orders, subscriptions, fulfillment, migration requests, and isolated manual fiscal requests.
 
-Phase 3 and the local TASK-040 Commerce gateway wiring are implemented and remain undeployed. They include the immutable policy resolver, retained storage, provider-neutral domain rules, conditional inventory transactions, eight literal browser routes, exact AWS_IAM Integrations commands/status lookup, normalized integration-event consumption, an idempotent notification outbox, subscription projections, reservation reconciliation, and isolated manual fiscal intake. There is no AWS `dev` environment. Test and production deployment remain closed until their external identities, alarms, quotas, cross-service dependencies, and live gates are reviewed and explicitly approved.
+Phase 4 Commerce wiring is implemented and verified locally at `2b495fdcf68132729863496b7a483fb44d69cf13`; it remains undeployed. The local service includes the immutable policy resolver, retained storage, provider-neutral domain rules, conditional inventory transactions, eight literal browser routes, exact AWS_IAM Integrations commands/status lookup, normalized integration-event consumption, an idempotent notification outbox, subscription projections, reservation reconciliation, and isolated manual fiscal intake. There is no AWS `dev` environment. Test and production deployment remain closed until their external identities, alarms, quotas, cross-service dependencies, and live gates are reviewed and explicitly approved.
 
 ## Boundaries
 
@@ -36,7 +36,7 @@ The undeployed SAM template owns three draft-scoped storage boundaries:
 
 All three use on-demand billing, server-side encryption, point-in-time recovery, retained replacement/deletion policy, and server-owned `pk`/`sk` keys. Catalog and Operations enable `expiresAt` TTL for eligible cleanup records only; Fiscal has no TTL until its approved retention policy exists. Only Operations enables a `NEW_IMAGE` DynamoDB Stream. Catalog has one sparse `KEYS_ONLY` `ReservationDueIndex`; the reconciler queries it and strongly rereads each base marker.
 
-The undeployed template also defines the Commerce notification-request topic, the Integration Events queue and DLQ, and a distinct outbox-stream failure queue. The SQS consumer and DynamoDB Stream relay report partial batch failures. The stream mapping accepts only pending Commerce Outbox records. TASK-040 now supplies the canonical provider-status gateway. The five-minute reconciliation schedule remains disabled until an approved deployment supplies the reviewed environment-specific `IntegrationsApiId`, verifies the cross-service route/IAM contract, and explicitly enables the schedule.
+The undeployed template also defines the Commerce notification-request topic, the Integration Events queue and DLQ, and a distinct outbox-stream failure queue. The SQS consumer and DynamoDB Stream relay report partial batch failures. The stream mapping accepts only pending Commerce Outbox records. The canonical provider-status gateway is wired locally. The five-minute reconciliation schedule remains disabled until an approved deployment supplies the reviewed environment-specific `IntegrationsApiId`, verifies the cross-service route/IAM contract, and explicitly enables the schedule.
 
 ## Domain Foundation
 
@@ -51,9 +51,9 @@ The pure `src/domain/` modules keep the first code-owned invariants independent 
 - canonical schema-versioned provider fingerprints that include every provider economic/restriction input but exclude version identity, lifecycle, presentation, and the policy currency allowlist;
 - the exact `draft -> provisioning -> active -> existing_only -> retired` transition path plus independently monotonic lifecycle and presentation revisions.
 
-Every money value requires the owning provider/policy currency allowlist and fails closed when the selected code is absent. This layer deliberately does not add a stale ISO registry or silently normalize browser input. Customer-facing discount code casing remains part of the immutable restriction fingerprint; TASK-041 will derive a separate case-folded lookup key to enforce active-code uniqueness. Data Spaces references contain identifiers only: the future authorized activation handler must derive environment/tenant/draft/domain from trusted policy, obtain and validate the allowlisted internal snapshot, and persist that snapshot before an offer becomes buyable. Constructors support trusted rehydration; future mutation handlers must load current server state, enforce bounded request/cardinality/provider limits, and apply revision/transition helpers with conditional persistence rather than accepting browser lifecycle values.
+Every money value requires the owning provider/policy currency allowlist and fails closed when the selected code is absent. This layer deliberately does not add a stale ISO registry or silently normalize browser input. Customer-facing discount code casing remains part of the immutable restriction fingerprint; the wired Integrations command layer derives the separate case-folded active-code claim and enforces uniqueness. Data Spaces references contain identifiers only: an authorized activation path must derive environment/tenant/draft/domain from trusted policy, obtain and validate the allowlisted internal snapshot, and persist that snapshot before an offer becomes buyable. Mutation handlers load current server state, enforce bounded request/cardinality/provider limits, and apply revision/transition helpers with conditional persistence rather than accepting browser lifecycle values.
 
-Subscription commands remain provider-neutral and use the exact TASK-040 AWS_IAM command gateway, including bounded subscription changes, discounts, pause policy, and fresh Customer Portal handoffs. The gateway is local-only until an approved deployment supplies `IntegrationsApiId`; it never accepts provider credentials or account identifiers from the browser. Fiscal PII is accepted only by the isolated fiscal routes/table after opt-in and live-gate checks; it is not written to drafts, Data Spaces, events, logs, or general Commerce projections. Data Spaces activation snapshots, Stripe mappings/calls inside Integrations, and every AWS deployment remain later work.
+Subscription commands remain provider-neutral and use the exact implemented AWS_IAM command gateway for bounded subscription changes, discounts, pause policy, and fresh Customer Portal handoffs. The gateway is local-only until an approved deployment supplies `IntegrationsApiId`; it never accepts provider credentials or account identifiers from the browser. Fiscal PII is accepted only by the isolated fiscal routes/table after opt-in and live-gate checks; it is not written to drafts, Data Spaces, events, logs, or general Commerce projections. Data Spaces activation snapshots and every AWS/provider-backed rollout remain later authorized work.
 
 ## Inventory Transactions
 
@@ -69,7 +69,7 @@ Subscription commands remain provider-neutral and use the exact TASK-040 AWS_IAM
 - uncertain due reservations move their draft-scoped marker forward by exactly five minutes, so one unresolved item cannot indefinitely hide later items; no scan or TTL acts as a commercial timer;
 - environment, tenant, and draft prefix every key, and the short DynamoDB client token is derived from both that scope and the exact transaction plan.
 
-The reconciler never treats unavailable or ambiguous provider evidence as permission to release stock. TASK-040 now provides the exact internal provider-status call and evidence adapter, while the schedule stays disabled until the reviewed `IntegrationsApiId` and explicit deployment enablement are present. No Commerce code contains a provider credential, customer identity document, raw provider payload, or persisted public provider URL.
+The reconciler never treats unavailable or ambiguous provider evidence as permission to release stock. The exact internal provider-status call and evidence adapter are implemented locally, while the schedule stays disabled until the reviewed `IntegrationsApiId` and explicit deployment enablement are present. No Commerce code contains a provider credential, customer identity document, raw provider payload, or persisted public provider URL.
 
 ## Server Boundaries
 
@@ -79,7 +79,7 @@ The API uses separate literal POST routes instead of a body-selected IAM router:
 - `/features/commerce/read` is protected by `commerce:catalog:read`;
 - `/features/commerce/catalog/action` is protected by `commerce:catalog:write`, CSRF, conditional revisions, and a durable 90-day Operations idempotency receipt;
 - `/features/commerce/inventory/action` is protected by `commerce:inventory:write` and uses the policy-owned stock location;
-- `/features/commerce/subscription/action` is protected by `commerce:subscription:manage` and calls only the exact signed TASK-040 subscription and Customer Portal routes;
+- `/features/commerce/subscription/action` is protected by `commerce:subscription:manage` and calls only the exact signed Integrations subscription and Customer Portal routes;
 - `/features/commerce/public-action` admits bounded Checkout requests using server-resolved scope, time, IDs, location, prices, the draft's closed currency allowlist, and a same-version notification target. Its `Idempotency-Key` is a recovery capability: the draft runtime must generate exactly 32 cryptographically random bytes, encode them as canonical unpadded base64url, keep the raw value out of logs/storage, and reuse it only for the exact lost-response retry;
 - `/features/commerce/fiscal/request` accepts a same-origin, single-use order-access proof only after verified payment state makes it eligible;
 - `/features/commerce/fiscal/admin` uses the distinct `commerce:fiscal:manage` capability and Fiscal-only PII access.
@@ -90,7 +90,15 @@ Catalog cursors are signed with the required deployment parameter `CommerceCurso
 
 In test, a fiscal-enabled Checkout returns a random opaque proof while Commerce stores only its SHA-256 hash in Operations. The proof is dormant until a verified paid (or refund-confirmed) event atomically opens the 24-hour request window; terminal unpaid makes it ineligible. An exact Checkout replay while payment is still pending conditionally rotates the stored hash and returns a replacement proof, so a lost response is recoverable without persisting the raw proof. That recovery is available only through the exact 256-bit Checkout capability described above; its internal idempotency namespace is separate from protected catalog, inventory, subscription, and fiscal mutations. Production fiscal capture remains blocked in code until the retention/deletion and accountant-access controls are implemented and approved; draft fields or deployment parameters cannot open that gate.
 
+## Deployment boundary
+
+The local SAM contract requires an environment-specific Integrations API identifier, Config Registry table and payload bucket names, Auth Admin session/state table names, the normalized Integration Events topic ARN, and a NoEcho Commerce cursor-signing key. Production fiscal capture additionally remains closed behind its explicit approval identifiers and code gate. This README records no parameter value, secret, account identifier, or deployed resource.
+
+The reservation reconciler's five-minute schedule is declared but disabled. Phase 8 must verify the exact cross-service IAM routes, deployment parameters, queues/topics, alarms, quotas, rollback, and provider-status evidence before explicitly enabling it. No local Phase 4 result authorizes an AWS deployment or schedule activation.
+
 ## Local Verification
+
+The final Phase 4 commit passed 206 unit and contract tests. One local test is intentionally skipped when `botocore`, supplied by the Lambda/SAM runtime, is not importable from the workstation interpreter.
 
 ```powershell
 python -m unittest discover -s tests -p "test_*.py"
