@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import Any, Callable
 
 try:
@@ -19,6 +20,7 @@ class ReconciliationError(RuntimeError):
 
 RECONCILIATION_WORK_LIMIT = 25
 MINIMUM_REMAINING_TIME_MS = 1_500
+_SAFE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
 
 class ReservationReconciler:
@@ -65,10 +67,10 @@ class ReservationReconciler:
                 result["failed"] += 1
                 continue
             try:
-                self._revalidate(due)
+                policy = self._revalidate(due)
                 if not _has_time_budget(remaining_time_ms):
                     break
-                status = self._status(due)
+                status = self._status(due, policy)
                 if not _has_time_budget(remaining_time_ms):
                     break
                 decision = reconciliation_outcome(status, now_epoch)
@@ -140,7 +142,7 @@ class ReservationReconciler:
                     pass
         return result
 
-    def _revalidate(self, due: DueReservation) -> None:
+    def _revalidate(self, due: DueReservation) -> Any:
         try:
             policy = self.policy_resolver(
                 domain=due.scope.domain,
@@ -157,12 +159,38 @@ class ReservationReconciler:
             or getattr(policy, "draft_id", None) != due.scope.draft_id
         ):
             raise ReconciliationError("published Commerce policy scope does not match")
+        return policy
 
-    def _status(self, due: DueReservation) -> str:
+    def _status(self, due: DueReservation, policy: Any) -> str:
         if self.status_gateway is None:
             return "lookup_failure"
+        descriptor = getattr(policy, "commerce", None)
+        expected_scope = {
+            "environment": due.scope.environment,
+            "tenantId": due.scope.tenant_id,
+            "draftId": due.scope.draft_id,
+            "domain": due.scope.domain,
+        }
+        commerce = descriptor.get("commerce") if isinstance(descriptor, dict) else None
+        payments = commerce.get("payments") if isinstance(commerce, dict) else None
+        connection_id = payments.get("bindingId") if isinstance(payments, dict) else None
+        if (
+            not isinstance(descriptor, dict)
+            or set(descriptor) != {"version", "scope", "commerce"}
+            or descriptor.get("version") != 1
+            or descriptor.get("scope") != expected_scope
+            or type(connection_id) is not str
+            or _SAFE_ID_RE.fullmatch(connection_id) is None
+        ):
+            raise ReconciliationError("published Commerce payment binding is invalid")
         try:
-            return self.status_gateway.lookup_status(due.scope, due.payment_attempt_id)
+            return self.status_gateway.lookup_status(
+                due.scope,
+                connection_id,
+                due.order_id,
+                due.payment_attempt_id,
+                1,
+            )
         except Exception:
             return "lookup_failure"
 

@@ -8,6 +8,11 @@ Parameters:
     AllowedValues:
       - test
       - prod
+  IntegrationsApiId:
+    Type: String
+    MinLength: 10
+    MaxLength: 10
+    AllowedPattern: ^[a-z0-9]{10}$
   ConfigRegistryTableName:
     Type: String
     MinLength: 3
@@ -631,6 +636,13 @@ Resources:
                 Resource:
                   - Fn::Sub: arn:${AWS::Partition}:s3:::${ConfigPayloadsBucketName}/sites/*/versions/*/*/server/commerce.json
                   - Fn::Sub: arn:${AWS::Partition}:s3:::${ConfigPayloadsBucketName}/sites/*/versions/*/*/server/auth-profile-registry.json
+              - Effect: Allow
+                Action: execute-api:Invoke
+                Resource:
+                  - Fn::Sub: arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${EnvironmentName}/POST/internal/v1/stripe/offer
+                  - Fn::Sub: arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${EnvironmentName}/POST/internal/v1/stripe/product-presentation
+                  - Fn::Sub: arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${EnvironmentName}/POST/internal/v1/stripe/discount
+                  - Fn::Sub: arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${EnvironmentName}/POST/internal/v1/stripe/discount-lifecycle
       Tags:
         - Key: Project
           Value: Zoolandingpage
@@ -745,6 +757,10 @@ Resources:
                 Resource:
                   - Fn::Sub: arn:${AWS::Partition}:s3:::${ConfigPayloadsBucketName}/sites/*/versions/*/*/server/commerce.json
                   - Fn::Sub: arn:${AWS::Partition}:s3:::${ConfigPayloadsBucketName}/sites/*/versions/*/*/server/notification-policies.json
+              - Effect: Allow
+                Action: execute-api:Invoke
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${EnvironmentName}/POST/internal/v1/stripe/checkout
       Tags:
         - Key: Project
           Value: Zoolandingpage
@@ -800,6 +816,13 @@ Resources:
                 Resource:
                   - Fn::Sub: arn:${AWS::Partition}:s3:::${ConfigPayloadsBucketName}/sites/*/versions/*/*/server/commerce.json
                   - Fn::Sub: arn:${AWS::Partition}:s3:::${ConfigPayloadsBucketName}/sites/*/versions/*/*/server/auth-profile-registry.json
+              - Effect: Allow
+                Action: execute-api:Invoke
+                Resource:
+                  - Fn::Sub: arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${EnvironmentName}/POST/internal/v1/stripe/subscription/change
+                  - Fn::Sub: arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${EnvironmentName}/POST/internal/v1/stripe/subscription/discount
+                  - Fn::Sub: arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${EnvironmentName}/POST/internal/v1/stripe/subscription/pause
+                  - Fn::Sub: arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${EnvironmentName}/POST/internal/v1/stripe/customer-portal
       Tags:
         - Key: Project
           Value: Zoolandingpage
@@ -974,6 +997,10 @@ Resources:
                 Action: s3:GetObject
                 Resource:
                   Fn::Sub: arn:${AWS::Partition}:s3:::${ConfigPayloadsBucketName}/sites/*/versions/*/*/server/commerce.json
+              - Effect: Allow
+                Action: execute-api:Invoke
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${EnvironmentName}/GET/internal/v1/stripe/checkout-status
       Tags:
         - Key: Project
           Value: Zoolandingpage
@@ -1079,6 +1106,8 @@ Resources:
             Ref: AuthUserStateTableName
           ENVIRONMENT_NAME:
             Ref: EnvironmentName
+          INTEGRATIONS_API_ID:
+            Ref: IntegrationsApiId
       Events:
         CatalogAction:
           Type: Api
@@ -1146,6 +1175,8 @@ Resources:
           ENVIRONMENT_NAME:
             Ref: EnvironmentName
           TEST_PREVIEW_ORIGIN: https://test.zoolandingpage.com.mx
+          INTEGRATIONS_API_ID:
+            Ref: IntegrationsApiId
       Events:
         Checkout:
           Type: Api
@@ -1179,6 +1210,8 @@ Resources:
             Ref: AuthUserStateTableName
           ENVIRONMENT_NAME:
             Ref: EnvironmentName
+          INTEGRATIONS_API_ID:
+            Ref: IntegrationsApiId
       Events:
         SubscriptionAction:
           Type: Api
@@ -1365,6 +1398,8 @@ Resources:
           ENVIRONMENT_NAME:
             Ref: EnvironmentName
           RESERVATION_DUE_INDEX_NAME: ReservationDueIndex
+          INTEGRATIONS_API_ID:
+            Ref: IntegrationsApiId
       Events:
         EveryFiveMinutes:
           Type: Schedule

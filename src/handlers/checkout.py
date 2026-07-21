@@ -30,6 +30,13 @@ try:
         fiscal_request_window_seconds,
         new_fiscal_access_proof,
     )
+    from integrations_gateway import (
+        GatewayConfigurationError,
+        IntegrationsConflict,
+        IntegrationsUnavailable,
+        InternalIntegrationsGateway,
+        canonical_hash,
+    )
     from storage import CommerceScope, CommerceStore
 except ModuleNotFoundError:
     from src.catalog_storage import CatalogStore
@@ -54,6 +61,13 @@ except ModuleNotFoundError:
         fiscal_request_window_seconds,
         new_fiscal_access_proof,
     )
+    from src.integrations_gateway import (
+        GatewayConfigurationError,
+        IntegrationsConflict,
+        IntegrationsUnavailable,
+        InternalIntegrationsGateway,
+        canonical_hash,
+    )
     from src.storage import CommerceScope, CommerceStore
 
 
@@ -70,7 +84,12 @@ def _handle(event: dict[str, Any], payload: dict[str, Any], request_id: str) -> 
     request = closed_object(payload, {"operation", "input"})
     if request["operation"] != "admitCheckout":
         raise validation_error()
-    input_value = closed_object(request["input"], {"lines"})
+    input_value = closed_object(
+        request["input"], {"lines"}, {"discountVersionId"}
+    )
+    discount_version_id = input_value.get("discountVersionId")
+    if discount_version_id is not None:
+        safe_id(discount_version_id)
     raw_lines = input_value["lines"]
     if not isinstance(raw_lines, list) or not 1 <= len(raw_lines) <= 20:
         raise validation_error()
@@ -129,6 +148,26 @@ def _handle(event: dict[str, Any], payload: dict[str, Any], request_id: str) -> 
     if contains_physical and contains_recurring:
         raise validation_error()
 
+    discount = None
+    if discount_version_id is not None:
+        if payments.get("coupons") is not True:
+            raise validation_error()
+        discount = catalog.get_checkout_discount(
+            scope,
+            discount_version_id,
+            currency_set,
+        )
+        intended_offers = {offer.version_id for offer, _quantity, _stock in resolved_lines}
+        if discount.eligible_offer_version_ids and not intended_offers.issubset(
+            discount.eligible_offer_version_ids
+        ):
+            raise validation_error()
+
+    tax_policy = _checkout_tax_policy(payments)
+    shipping_policy = _checkout_shipping_policy(
+        commerce.get("shipping"), contains_physical
+    )
+
     order_id = _new_id("order", scope, idempotency_key)
     payment_attempt_id = _new_id("attempt", scope, idempotency_key)
     reservation_id = _new_id("reservation", scope, idempotency_key)
@@ -162,10 +201,56 @@ def _handle(event: dict[str, Any], payload: dict[str, Any], request_id: str) -> 
     )
     result = dict(result)
     stored_hash = result.pop("fiscalAccessHash", None)
-    if fiscal_access is not None and stored_hash == fiscal_access["proofHash"]:
-        result["fiscalAccessProof"] = fiscal_proof
-        result["fiscalAccessState"] = "pending_payment"
-    return result
+    command_input = {
+        "orderId": result["orderId"],
+        "paymentAttemptId": result["paymentAttemptId"],
+        "revision": 1,
+        "reservationIds": [result["reservationId"]],
+        "checkoutExpiresAt": result["checkoutExpiresAt"],
+        "offerBindings": [
+            {
+                "offerVersionId": offer.version_id,
+                "revision": offer.revision,
+                "quantity": quantity,
+                "sellableType": offer.sellable_type,
+                "snapshot": offer.provider_snapshot(),
+                "contentHash": canonical_hash({
+                    "schemaVersion": 1,
+                    "snapshot": offer.provider_snapshot(),
+                }),
+            }
+            for offer, quantity, _stock_id_value in resolved_lines
+        ],
+        "taxPolicy": tax_policy,
+        "shippingPolicy": shipping_policy,
+        "paymentCollection": "immediate_card_link",
+    }
+    if discount is not None:
+        command_input["discountVersionId"] = discount.version_id
+    gateway_result = _create_checkout(
+        scope,
+        safe_id(payments.get("bindingId")),
+        command_input,
+    )
+    if (
+        gateway_result.get("status") == "accepted"
+        and gateway_result.get("expiresAt") != result["checkoutExpiresAt"]
+    ):
+        raise HttpError(
+            503,
+            "upstream_unavailable",
+            "Service temporarily unavailable.",
+            retryable=True,
+        )
+    response = dict(gateway_result)
+    if (
+        response.get("status") == "accepted"
+        and fiscal_access is not None
+        and stored_hash == fiscal_access["proofHash"]
+    ):
+        response["fiscalAccessProof"] = fiscal_proof
+        response["fiscalAccessState"] = "pending_payment"
+    return response
 
 
 def _validate_origin_binding(event: dict[str, Any], domain: str) -> None:
@@ -341,3 +426,68 @@ def _catalog_store() -> CatalogStore:
 
 def _commerce_store() -> CommerceStore:
     return CommerceStore.from_environment()
+
+
+def _gateway() -> InternalIntegrationsGateway:
+    return InternalIntegrationsGateway.from_environment()
+
+
+def _create_checkout(
+    scope: CommerceScope,
+    connection_id: str,
+    command_input: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        return _gateway().create_checkout(scope, connection_id, command_input)
+    except IntegrationsConflict:
+        raise HttpError(
+            409,
+            "conflict",
+            "Request conflicts with current state.",
+        ) from None
+    except (IntegrationsUnavailable, GatewayConfigurationError):
+        raise HttpError(
+            503,
+            "upstream_unavailable",
+            "Service temporarily unavailable.",
+            retryable=True,
+        ) from None
+
+
+def _checkout_tax_policy(payments: Any) -> dict[str, str]:
+    if not isinstance(payments, dict):
+        raise policy_unavailable()
+    policy = payments.get("taxPolicy", {"mode": "disabled"})
+    if (
+        not isinstance(policy, dict)
+        or set(policy) != {"mode"}
+        or policy.get("mode") not in {"disabled", "automatic"}
+    ):
+        raise policy_unavailable()
+    return {"mode": policy["mode"]}
+
+
+def _checkout_shipping_policy(
+    shipping: Any,
+    contains_physical: bool,
+) -> dict[str, Any]:
+    if not contains_physical:
+        return {"collection": "none"}
+    if not isinstance(shipping, dict):
+        raise policy_unavailable()
+    countries = shipping.get("allowedCountries")
+    if (
+        shipping.get("enabled") is not True
+        or not isinstance(countries, list)
+        or not 1 <= len(countries) <= 50
+        or len(set(countries)) != len(countries)
+        or any(
+            type(country) is not str
+            or len(country) != 2
+            or not country.isascii()
+            or not country.isupper()
+            for country in countries
+        )
+    ):
+        raise policy_unavailable()
+    return {"collection": "required", "allowedCountries": list(countries)}

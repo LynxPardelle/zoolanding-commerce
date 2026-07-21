@@ -70,6 +70,12 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertEqual(bucket["MaxLength"], "63")
         self.assertEqual(bucket["AllowedPattern"], "^[a-z0-9][a-z0-9.-]*[a-z0-9]$")
 
+        integrations_api = parameters["IntegrationsApiId"]
+        self.assertEqual(integrations_api["MinLength"], "10")
+        self.assertEqual(integrations_api["MaxLength"], "10")
+        self.assertEqual(integrations_api["AllowedPattern"], "^[a-z0-9]{10}$")
+        self.assertNotIn("Default", integrations_api)
+
         for name in ("FiscalRetentionApprovalId", "FiscalAccessApprovalId"):
             parameter = parameters[name]
             self.assertEqual(parameter.get("MaxLength"), "64")
@@ -349,6 +355,54 @@ class RepositoryContractTests(unittest.TestCase):
         )
         variables = resources["SubscriptionActionFunction"]["Properties"]["Environment"]["Variables"]
         self.assertEqual(variables["COMMERCE_OPERATIONS_TABLE_NAME"], {"Ref": "CommerceOperationsTable"})
+
+    def test_internal_integrations_permissions_are_literal_method_and_route_scoped(self):
+        resources = load_template()["Resources"]
+        expected = {
+            "CatalogActionRole": {
+                "POST/internal/v1/stripe/offer",
+                "POST/internal/v1/stripe/product-presentation",
+                "POST/internal/v1/stripe/discount",
+                "POST/internal/v1/stripe/discount-lifecycle",
+            },
+            "CheckoutRole": {"POST/internal/v1/stripe/checkout"},
+            "SubscriptionActionRole": {
+                "POST/internal/v1/stripe/subscription/change",
+                "POST/internal/v1/stripe/subscription/discount",
+                "POST/internal/v1/stripe/subscription/pause",
+                "POST/internal/v1/stripe/customer-portal",
+            },
+            "ReservationReconcilerRole": {
+                "GET/internal/v1/stripe/checkout-status"
+            },
+        }
+        prefix = (
+            "arn:${AWS::Partition}:execute-api:${AWS::Region}:"
+            "${AWS::AccountId}:${IntegrationsApiId}/${EnvironmentName}/"
+        )
+        for role_id, suffixes in expected.items():
+            statements = resources[role_id]["Properties"]["Policies"][0][
+                "PolicyDocument"
+            ]["Statement"]
+            invoke = [
+                statement
+                for statement in statements
+                if statement.get("Action") == "execute-api:Invoke"
+            ]
+            self.assertEqual(len(invoke), 1, role_id)
+            actual = invoke[0]["Resource"]
+            actual = actual if isinstance(actual, list) else [actual]
+            self.assertEqual(
+                {resource["Fn::Sub"] for resource in actual},
+                {prefix + suffix for suffix in suffixes},
+            )
+            self.assertNotIn("*", str(actual), role_id)
+            variables = resources[role_id.removesuffix("Role") + "Function"][
+                "Properties"
+            ]["Environment"]["Variables"]
+            self.assertEqual(
+                variables["INTEGRATIONS_API_ID"], {"Ref": "IntegrationsApiId"}
+            )
 
     def test_cursor_signing_key_is_injected_only_into_catalog_readers(self):
         resources = load_template()["Resources"]

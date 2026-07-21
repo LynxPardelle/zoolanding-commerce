@@ -27,6 +27,7 @@ def main():
             "AuthSessionTableName": "zoolanding-auth-sessions-test",
             "AuthUserStateTableName": "zoolanding-auth-users-test",
             "IntegrationEventsTopicArn": "arn:aws:sns:us-east-1:111122223333:zoolanding-events-test",
+            "IntegrationsApiId": "abcdefghij",
             "FiscalProductionApproved": "false",
             "FiscalRetentionApprovalId": "",
             "FiscalAccessApprovalId": "",
@@ -65,7 +66,8 @@ def main():
         },
         "CatalogActionRole": {
             "dynamodb:GetItem", "dynamodb:TransactWriteItems",
-            "logs:CreateLogStream", "logs:PutLogEvents", "s3:GetObject",
+            "execute-api:Invoke", "logs:CreateLogStream", "logs:PutLogEvents",
+            "s3:GetObject",
         },
         "InventoryActionRole": {
             "dynamodb:GetItem", "dynamodb:TransactWriteItems",
@@ -73,11 +75,13 @@ def main():
         },
         "CheckoutRole": {
             "dynamodb:GetItem", "dynamodb:TransactWriteItems",
-            "logs:CreateLogStream", "logs:PutLogEvents", "s3:GetObject",
+            "execute-api:Invoke", "logs:CreateLogStream", "logs:PutLogEvents",
+            "s3:GetObject",
         },
         "SubscriptionActionRole": {
             "dynamodb:GetItem", "dynamodb:TransactWriteItems",
-            "logs:CreateLogStream", "logs:PutLogEvents", "s3:GetObject",
+            "execute-api:Invoke", "logs:CreateLogStream", "logs:PutLogEvents",
+            "s3:GetObject",
         },
         "FiscalRequestRole": {
             "dynamodb:GetItem", "dynamodb:TransactWriteItems",
@@ -110,7 +114,8 @@ def main():
         },
         "ReservationReconcilerRole": {
             "dynamodb:GetItem", "dynamodb:Query", "dynamodb:TransactWriteItems",
-            "logs:CreateLogStream", "logs:PutLogEvents", "s3:GetObject",
+            "execute-api:Invoke", "logs:CreateLogStream", "logs:PutLogEvents",
+            "s3:GetObject",
         },
     }
     iam_roles = {

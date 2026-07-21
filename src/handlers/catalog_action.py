@@ -26,6 +26,12 @@ try:
     from common.published_policy import resolve_policies
     from domain.catalog import CatalogItem, CatalogVariant, DataSpaceRecordReference
     from domain.offers import DiscountVersion, Money, OfferRecurrence, OfferVersion
+    from integrations_gateway import (
+        GatewayConfigurationError,
+        IntegrationsConflict,
+        IntegrationsUnavailable,
+        InternalIntegrationsGateway,
+    )
 except ModuleNotFoundError:
     from src.catalog_storage import CatalogStore
     from src.common.auth_admin import authorize_request
@@ -46,6 +52,12 @@ except ModuleNotFoundError:
     from src.common.published_policy import resolve_policies
     from src.domain.catalog import CatalogItem, CatalogVariant, DataSpaceRecordReference
     from src.domain.offers import DiscountVersion, Money, OfferRecurrence, OfferVersion
+    from src.integrations_gateway import (
+        GatewayConfigurationError,
+        IntegrationsConflict,
+        IntegrationsUnavailable,
+        InternalIntegrationsGateway,
+    )
 
 
 PATH = "/features/commerce/catalog/action"
@@ -91,6 +103,7 @@ def _handle(event: dict[str, Any], payload: dict[str, Any], request_id: str) -> 
     }
     scope = resolved_scope(policies)
     store = _store()
+    connection_id = safe_id(commerce.get("payments", {}).get("bindingId"))
 
     if operation == "createItem":
         if input_value["sellableType"] not in commerce.get("sellableTypes", []):
@@ -121,8 +134,47 @@ def _handle(event: dict[str, Any], payload: dict[str, Any], request_id: str) -> 
             **metadata,
         )
     if operation == "advanceOfferLifecycle":
-        if input_value["targetState"] == "active":
-            raise HttpError(503, "upstream_unavailable", "Service temporarily unavailable.", retryable=True)
+        current = store.get_offer_version(
+            scope, input_value["versionId"], currencies
+        )
+        if current.lifecycle_revision != input_value["expectedRevision"]:
+            raise _conflict()
+        try:
+            updated = current.with_lifecycle(
+                input_value["targetState"], input_value["expectedRevision"] + 1
+            )
+        except ValueError:
+            raise _conflict() from None
+        if updated.lifecycle_state == "active":
+            gateway = _configured_gateway()
+            result = _gateway_call(
+                gateway.provision_offer,
+                scope,
+                connection_id,
+                updated,
+            )
+            if result["status"] != "accepted":
+                return result
+            if updated.display_name is not None:
+                result = _gateway_call(
+                    gateway.update_offer_presentation,
+                    scope,
+                    connection_id,
+                    updated,
+                )
+                if result["status"] != "accepted":
+                    return result
+        elif updated.lifecycle_state == "retired":
+            gateway = _configured_gateway()
+            result = _gateway_call(
+                gateway.deactivate_offer,
+                scope,
+                connection_id,
+                updated.version_id,
+                updated.lifecycle_revision,
+            )
+            if result["status"] != "accepted":
+                return result
         return store.advance_offer_lifecycle(
             scope,
             input_value["versionId"],
@@ -132,6 +184,31 @@ def _handle(event: dict[str, Any], payload: dict[str, Any], request_id: str) -> 
             **metadata,
         )
     if operation == "updateOfferPresentation":
+        current = store.get_offer_version(
+            scope, input_value["versionId"], currencies
+        )
+        if current.presentation_revision != input_value["expectedRevision"]:
+            raise _conflict()
+        try:
+            updated = current.with_presentation(
+                input_value["expectedRevision"] + 1,
+                display_name=input_value.get("displayName"),
+                display_description=input_value.get("displayDescription"),
+            )
+        except ValueError:
+            raise _conflict() from None
+        if current.lifecycle_state in {"active", "existing_only"}:
+            gateway = _configured_gateway()
+            result = _gateway_call(
+                gateway.update_offer_presentation,
+                scope,
+                connection_id,
+                updated,
+            )
+            if result["status"] != "accepted":
+                return result
+        elif current.lifecycle_state == "retired":
+            raise _conflict()
         return store.update_offer_presentation(
             scope,
             input_value["versionId"],
@@ -142,8 +219,37 @@ def _handle(event: dict[str, Any], payload: dict[str, Any], request_id: str) -> 
             **metadata,
         )
     if operation == "advanceDiscountLifecycle":
-        if input_value["targetState"] == "active":
-            raise HttpError(503, "upstream_unavailable", "Service temporarily unavailable.", retryable=True)
+        current = store.get_discount_version(
+            scope, input_value["versionId"], currencies
+        )
+        if current.lifecycle_revision != input_value["expectedRevision"]:
+            raise _conflict()
+        try:
+            updated = current.with_lifecycle(
+                input_value["targetState"], input_value["expectedRevision"] + 1
+            )
+        except ValueError:
+            raise _conflict() from None
+        if updated.lifecycle_state == "active":
+            gateway = _configured_gateway()
+            result = _gateway_call(
+                gateway.provision_discount,
+                scope,
+                connection_id,
+                updated,
+            )
+            if result["status"] != "accepted":
+                return result
+        elif updated.lifecycle_state in {"existing_only", "retired"}:
+            gateway = _configured_gateway()
+            result = _gateway_call(
+                gateway.update_discount_lifecycle,
+                scope,
+                connection_id,
+                updated,
+            )
+            if result["status"] != "accepted":
+                return result
         return store.advance_discount_lifecycle(
             scope,
             input_value["versionId"],
@@ -355,3 +461,37 @@ def _display_fields(value: dict[str, Any]) -> None:
 
 def _store() -> CatalogStore:
     return CatalogStore.from_environment(mutations=True)
+
+
+def _gateway() -> InternalIntegrationsGateway:
+    return InternalIntegrationsGateway.from_environment()
+
+
+def _configured_gateway() -> InternalIntegrationsGateway:
+    try:
+        return _gateway()
+    except GatewayConfigurationError:
+        raise HttpError(
+            503,
+            "upstream_unavailable",
+            "Service temporarily unavailable.",
+            retryable=True,
+        ) from None
+
+
+def _gateway_call(callback: Any, *args: Any) -> dict[str, Any]:
+    try:
+        return callback(*args)
+    except IntegrationsConflict:
+        raise _conflict() from None
+    except (IntegrationsUnavailable, GatewayConfigurationError):
+        raise HttpError(
+            503,
+            "upstream_unavailable",
+            "Service temporarily unavailable.",
+            retryable=True,
+        ) from None
+
+
+def _conflict() -> HttpError:
+    return HttpError(409, "conflict", "Request conflicts with current state.")

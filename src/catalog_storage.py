@@ -476,6 +476,33 @@ class CatalogStore:
             raise StorageNotFound("offer is not available")
         return offer, self._catalog_item(scope, offer.catalog_item_id)
 
+    def get_offer_version(
+        self,
+        scope: CommerceScope,
+        version_id: str,
+        supported_currencies: frozenset[str],
+    ) -> OfferVersion:
+        return self._offer(scope, version_id, _currencies(supported_currencies))
+
+    def get_discount_version(
+        self,
+        scope: CommerceScope,
+        version_id: str,
+        supported_currencies: frozenset[str],
+    ) -> DiscountVersion:
+        return self._discount(scope, version_id, _currencies(supported_currencies))
+
+    def get_checkout_discount(
+        self,
+        scope: CommerceScope,
+        version_id: str,
+        supported_currencies: frozenset[str],
+    ) -> DiscountVersion:
+        discount = self.get_discount_version(scope, version_id, supported_currencies)
+        if discount.lifecycle_state != "active":
+            raise StorageNotFound("discount is not available")
+        return discount
+
     def get_public_offer(
         self,
         scope: CommerceScope,

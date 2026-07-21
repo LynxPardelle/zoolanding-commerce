@@ -14,6 +14,7 @@ try:
         RECONCILIATION_WORK_LIMIT,
         ReservationReconciler,
     )
+    from integrations_gateway import InternalIntegrationsGateway
     from storage import CommerceStore
 except ModuleNotFoundError:
     from src.common.published_policy import resolve_commerce_policy
@@ -22,6 +23,7 @@ except ModuleNotFoundError:
         RECONCILIATION_WORK_LIMIT,
         ReservationReconciler,
     )
+    from src.integrations_gateway import InternalIntegrationsGateway
     from src.storage import CommerceStore
 
 
@@ -56,10 +58,9 @@ def lambda_handler(_event: object, context: Any) -> dict[str, int]:
 def _reconciler_from_environment() -> ReservationReconciler:
     global _RECONCILER
     if _RECONCILER is None:
-        # TASK-040 will inject the internal canonical status gateway.
         _RECONCILER = ReservationReconciler(
             CommerceStore.from_environment(),
             resolve_commerce_policy,
-            None,
+            InternalIntegrationsGateway.from_environment(),
         )
     return _RECONCILER

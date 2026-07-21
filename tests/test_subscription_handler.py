@@ -236,7 +236,12 @@ class SubscriptionBoundaryTests(unittest.TestCase):
             (
                 "applyDiscount",
                 {"subscriptionId": "subscription-1", "discountVersionId": "discount-1", "expectedRevision": 1},
-                {"subscriptionId": "subscription-1", "discountVersionId": "discount-1", "expectedRevision": 1},
+                {
+                    "subscriptionId": "subscription-1",
+                    "discountVersionId": "discount-1",
+                    "expectedRevision": 1,
+                    "action": "apply",
+                },
             ),
             (
                 "pause",
@@ -319,6 +324,19 @@ class SubscriptionBoundaryTests(unittest.TestCase):
         response, _ = self.call({"operation": "resume", "input": {"subscriptionId": "subscription-1", "expectedRevision": 1}})
         self.assertEqual(response["statusCode"], 503)
         self.assertNotIn("provider.invalid", response["body"])
+
+        self.gateway.execute = lambda *args, **kwargs: {
+            "commandId": "command-portal",
+            "status": "accepted",
+            "redirectUrl": "https://billing.stripe.com:444/private",
+            "expiresAt": NOW + 600,
+        }
+        portal, _ = self.call({
+            "operation": "openPortal",
+            "input": {"subscriptionId": "subscription-1"},
+        })
+        self.assertEqual(portal["statusCode"], 503)
+        self.assertNotIn("private", portal["body"])
 
     def test_browser_cannot_inject_billing_provider_or_cross_draft_fields(self):
         forbidden_inputs = (

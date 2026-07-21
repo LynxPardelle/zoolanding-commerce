@@ -357,7 +357,7 @@ def _validate_admin_access(value: Any) -> None:
 
 
 def _validate_payments(value: Any) -> dict[str, Any]:
-    keys = {
+    required_keys = {
         "bindingId",
         "supportedCurrencies",
         "oneTime",
@@ -367,7 +367,10 @@ def _validate_payments(value: Any) -> dict[str, Any]:
         "planChangePolicy",
         "pausePolicy",
     }
-    if not isinstance(value, dict) or set(value) != keys:
+    if not isinstance(value, dict) or set(value) not in (
+        required_keys,
+        required_keys | {"taxPolicy"},
+    ):
         raise PolicyResolutionError("Published Commerce policy is invalid")
     _safe_id(value.get("bindingId"))
     currencies = value.get("supportedCurrencies")
@@ -380,7 +383,7 @@ def _validate_payments(value: Any) -> dict[str, Any]:
         raise PolicyResolutionError("Published Commerce policy is invalid")
     if any(
         type(value.get(key)) is not bool
-        for key in keys
+        for key in required_keys
         - {
             "bindingId",
             "supportedCurrencies",
@@ -391,6 +394,14 @@ def _validate_payments(value: Any) -> dict[str, Any]:
         raise PolicyResolutionError("Published Commerce policy is invalid")
     validated_plan_change_policy(value.get("planChangePolicy"))
     validated_pause_policy(value.get("pausePolicy"))
+    if "taxPolicy" in value:
+        tax_policy = value["taxPolicy"]
+        if (
+            not isinstance(tax_policy, dict)
+            or set(tax_policy) != {"mode"}
+            or tax_policy.get("mode") not in {"disabled", "automatic"}
+        ):
+            raise PolicyResolutionError("Published Commerce policy is invalid")
     return value
 
 
@@ -467,9 +478,29 @@ def _validate_inventory(value: Any) -> dict[str, Any]:
 
 
 def _validate_shipping(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != {"enabled", "methods"} or type(value.get("enabled")) is not bool:
+    required_keys = {"enabled", "methods"}
+    if (
+        not isinstance(value, dict)
+        or set(value) not in (required_keys, required_keys | {"allowedCountries"})
+        or type(value.get("enabled")) is not bool
+    ):
         raise PolicyResolutionError("Published Commerce policy is invalid")
     _unique_enum_list(value.get("methods"), SHIPPING_METHODS, 1, 3)
+    if "allowedCountries" in value:
+        countries = value["allowedCountries"]
+        if (
+            not isinstance(countries, list)
+            or not 1 <= len(countries) <= 50
+            or len(set(countries)) != len(countries)
+            or any(
+                type(country) is not str
+                or len(country) != 2
+                or not country.isascii()
+                or not country.isupper()
+                for country in countries
+            )
+        ):
+            raise PolicyResolutionError("Published Commerce policy is invalid")
     return value
 
 

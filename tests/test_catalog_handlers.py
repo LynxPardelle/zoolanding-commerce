@@ -127,6 +127,24 @@ class HandlerStore:
         self.calls.append(("create_offer", scope, item, metadata))
         return {"versionId": item.version_id, "revision": 1}
 
+    def get_offer_version(self, scope, version_id, supported_currencies):
+        from src.domain.offers import Money, OfferVersion
+
+        self.calls.append(
+            ("get_offer_version", scope, version_id, supported_currencies)
+        )
+        return OfferVersion(
+            version_id,
+            "item-1",
+            None,
+            1,
+            "service",
+            Money(90_000, "MXN", frozenset({"MXN"})),
+            "exclusive",
+            lifecycle_state="provisioning",
+            lifecycle_revision=2,
+        )
+
     def adjust_stock(self, *args, **kwargs):
         self.calls.append(("adjust_stock", args, kwargs))
         return {"action": "adjust", "revision": 1}

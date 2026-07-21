@@ -425,6 +425,31 @@ class PublishedPolicyResolverTests(unittest.TestCase):
             {"enabled": False},
         )
 
+    def test_checkout_provider_policies_are_optional_closed_and_server_owned(self):
+        from src.common.published_policy import PolicyResolutionError
+
+        payments = self.s3.objects[self.commerce_key]["commerce"]["payments"]
+        shipping = self.s3.objects[self.commerce_key]["commerce"]["shipping"]
+        payments["taxPolicy"] = {"mode": "automatic"}
+        shipping["allowedCountries"] = ["MX", "US"]
+
+        resolved = self.resolve().commerce["commerce"]
+
+        self.assertEqual(resolved["payments"]["taxPolicy"], {"mode": "automatic"})
+        self.assertEqual(resolved["shipping"]["allowedCountries"], ["MX", "US"])
+
+        for path, value in (
+            (("payments", "taxPolicy"), {"mode": "client-selectable"}),
+            (("shipping", "allowedCountries"), ["mx"]),
+            (("shipping", "allowedCountries"), ["MX", "MX"]),
+            (("shipping", "allowedCountries"), []),
+        ):
+            with self.subTest(path=path, value=value):
+                self.setUp()
+                self.s3.objects[self.commerce_key]["commerce"][path[0]][path[1]] = value
+                with self.assertRaises(PolicyResolutionError):
+                    self.resolve()
+
     def test_requires_currency_policy_and_allows_at_most_one_notification_policy(self):
         from src.common.published_policy import PolicyResolutionError
 

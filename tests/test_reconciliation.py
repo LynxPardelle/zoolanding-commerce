@@ -25,6 +25,16 @@ class Policies:
             environment=environment,
             tenant_id=tenant_id,
             draft_id=draft_id,
+            commerce={
+                "version": 1,
+                "scope": {
+                    "environment": environment,
+                    "tenantId": tenant_id,
+                    "draftId": draft_id,
+                    "domain": domain,
+                },
+                "commerce": {"payments": {"bindingId": "stripe-main"}},
+            },
         )
 
 
@@ -34,8 +44,12 @@ class Statuses:
         self.error = error
         self.calls = []
 
-    def lookup_status(self, scope, payment_attempt_id):
-        self.calls.append((scope, payment_attempt_id))
+    def lookup_status(
+        self, scope, connection_id, order_id, payment_attempt_id, revision
+    ):
+        self.calls.append(
+            (scope, connection_id, order_id, payment_attempt_id, revision)
+        )
         if self.error:
             raise self.error
         return self.status
@@ -99,7 +113,9 @@ class ReconciliationTests(unittest.TestCase):
         paid, policy, statuses = self.reconcile("paid")
         self.assertEqual(paid, {"processed": 1, "committed": 1, "released": 0, "deferred": 0, "failed": 0})
         self.assertEqual(policy.calls, [(SCOPE.domain, "test", SCOPE.tenant_id, SCOPE.draft_id)])
-        self.assertEqual(statuses.calls, [(SCOPE, "attempt-1")])
+        self.assertEqual(statuses.calls, [(
+            SCOPE, "stripe-main", "order-1", "attempt-1", 1
+        )])
         stock = self.backend.get(CATALOG_TABLE, SCOPE.partition_key, "STOCK#primary#landing")
         self.assertEqual((stock["onHand"], stock["reserved"]), (8, 0))
         self.assertTrue(any(
@@ -208,6 +224,16 @@ class ReconciliationTests(unittest.TestCase):
                 environment=environment,
                 tenant_id=tenant_id,
                 draft_id=draft_id,
+                commerce={
+                    "version": 1,
+                    "scope": {
+                        "environment": environment,
+                        "tenantId": tenant_id,
+                        "draftId": draft_id,
+                        "domain": domain,
+                    },
+                    "commerce": {"payments": {"bindingId": "stripe-main"}},
+                },
             )
 
         result = ReservationReconciler(self.store, policies, Statuses("paid")).run(
@@ -378,6 +404,16 @@ class ReconciliationTests(unittest.TestCase):
                 environment=environment,
                 tenant_id=tenant_id,
                 draft_id=draft_id,
+                commerce={
+                    "version": 1,
+                    "scope": {
+                        "environment": environment,
+                        "tenantId": tenant_id,
+                        "draftId": draft_id,
+                        "domain": domain,
+                    },
+                    "commerce": {"payments": {"bindingId": "stripe-main"}},
+                },
             )
 
         reconciler = ReservationReconciler(self.store, policies, Statuses("unknown"))

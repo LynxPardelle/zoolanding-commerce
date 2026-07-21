@@ -58,6 +58,20 @@ class FakeCommerce:
         return result
 
 
+class FakeCheckoutGateway:
+    def __init__(self):
+        self.calls = []
+
+    def create_checkout(self, scope, connection_id, command_input):
+        self.calls.append((scope, connection_id, command_input))
+        return {
+            "commandId": "command-checkout",
+            "status": "accepted",
+            "redirectUrl": "https://checkout.stripe.com/c/pay/test",
+            "expiresAt": command_input["checkoutExpiresAt"],
+        }
+
+
 def offer_and_item(*, sellable_type="service", recurring=False, variant_id=None):
     from src.domain.catalog import CatalogItem, CatalogVariant
     from src.domain.offers import Money, OfferRecurrence, OfferVersion
@@ -88,6 +102,14 @@ def offer_and_item(*, sellable_type="service", recurring=False, variant_id=None)
     },
 )
 class CheckoutHandlerContractTests(unittest.TestCase):
+    def setUp(self):
+        from src.handlers import checkout
+
+        self.gateway = FakeCheckoutGateway()
+        gateway_patch = patch.object(checkout, "_gateway", return_value=self.gateway)
+        gateway_patch.start()
+        self.addCleanup(gateway_patch.stop)
+
     def test_checkout_handler_exists(self):
         self.assertIsNotNone(importlib.util.find_spec("src.handlers.checkout"))
 
@@ -164,15 +186,25 @@ class CheckoutHandlerContractTests(unittest.TestCase):
             "recipientSetVersion": 1,
             "recipientMemberId": "primary",
         })
-        self.assertNotIn("url", response["body"].lower())
         self.assertNotIn(PUBLIC_CHECKOUT_RECOVERY_KEY, response["body"])
-        self.assertEqual(response_body(response)["data"]["status"], "reserved")
+        self.assertEqual(
+            response_body(response)["data"],
+            {
+                "commandId": "command-checkout",
+                "status": "accepted",
+                "redirectUrl": "https://checkout.stripe.com/c/pay/test",
+                "expiresAt": 1_800_002_100,
+            },
+        )
+        self.assertNotIn("reservation", response["body"].lower())
+        self.assertNotIn("paymentattempt", response["body"].lower())
 
     def test_physical_stock_target_is_server_derived(self):
         from src.handlers import checkout
 
         policies = resolved_policies()
         policies.commerce["commerce"]["notificationPolicyIds"] = []
+        policies.commerce["commerce"]["shipping"]["allowedCountries"] = ["MX"]
         catalog = FakeCatalog({"offer-1": offer_and_item(sellable_type="physical", variant_id="blue")})
         commerce = FakeCommerce()
         with (
@@ -191,6 +223,33 @@ class CheckoutHandlerContractTests(unittest.TestCase):
         self.assertEqual(response["statusCode"], 200)
         order = commerce.calls[0][0][1]
         self.assertEqual(order.lines[0].stock_id, "item-1.blue")
+
+    def test_missing_physical_shipping_policy_fails_before_reservation(self):
+        from src.handlers import checkout
+
+        policies = resolved_policies()
+        policies.commerce["commerce"]["notificationPolicyIds"] = []
+        catalog = FakeCatalog({
+            "offer-1": offer_and_item(sellable_type="physical", variant_id="blue")
+        })
+        commerce = FakeCommerce()
+        with (
+            patch.object(checkout, "resolve_checkout_policy", return_value=policies),
+            patch.object(checkout, "_catalog_store", return_value=catalog),
+            patch.object(checkout, "_commerce_store", return_value=commerce),
+        ):
+            response = checkout.lambda_handler(
+                checkout_event({
+                    "operation": "admitCheckout",
+                    "input": {
+                        "lines": [{"offerVersionId": "offer-1", "quantity": 1}]
+                    },
+                }),
+                None,
+            )
+
+        self.assertEqual(response["statusCode"], 503)
+        self.assertEqual(commerce.calls, [])
 
     def test_checkout_rejects_an_offer_currency_outside_the_published_allowlist(self):
         from src.handlers import checkout
