@@ -21,6 +21,20 @@ OPERATIONS_TABLE = "operations-table"
 NOW = 1_800_000_000
 
 
+def pause_policy():
+    return {
+        "enabled": True,
+        "newInvoiceBehavior": "void",
+        "existingInvoiceBehavior": "unchanged",
+        "accessBehavior": "suspend",
+        "resume": {"mode": "manual"},
+        "onResume": {
+            "collection": "restore",
+            "access": "restore-if-suspended",
+        },
+    }
+
+
 def policies():
     commerce = {
         "status": "active",
@@ -32,12 +46,13 @@ def policies():
         "sellableTypes": ["service", "subscription"],
         "payments": {
             "bindingId": "payments-primary",
+            "supportedCurrencies": ["MXN"],
             "oneTime": True,
             "subscriptions": True,
             "editablePrices": True,
             "coupons": True,
-            "operatorPauses": True,
-            "proration": "operator-selectable",
+            "planChangePolicy": {"mode": "immediate-prorated"},
+            "pausePolicy": pause_policy(),
         },
         "inventory": {"enabled": False, "tracked": False, "backorders": False, "locationId": "primary"},
         "shipping": {"enabled": False, "methods": ["free"]},
@@ -143,17 +158,40 @@ class SubscriptionBoundaryTests(unittest.TestCase):
             patch.object(subscription_action, "resolve_policies", return_value=self.policies),
             patch.object(subscription_action, "authorize_request", side_effect=auth if isinstance(auth, Exception) else None, return_value=None if isinstance(auth, Exception) else auth) as authorize,
             patch.object(subscription_action, "_gateway", return_value=self.gateway if use_gateway else subscription_action.UnavailableSubscriptionGateway()),
+            patch("time.time", return_value=NOW),
         ):
             return subscription_action.lambda_handler(api_event(payload), None), authorize
 
     def test_exact_operations_are_authenticated_csrf_protected_and_provider_neutral(self):
         cases = (
-            ("changePlan", {"subscriptionId": "subscription-1", "targetOfferVersionId": "offer-2", "expectedRevision": 1, "proration": "prorate"}),
-            ("applyDiscount", {"subscriptionId": "subscription-1", "discountVersionId": "discount-1", "expectedRevision": 1}),
-            ("pause", {"subscriptionId": "subscription-1", "expectedRevision": 1, "billingBehavior": "void", "accessBehavior": "pause", "resumeAt": NOW + 3600}),
-            ("resume", {"subscriptionId": "subscription-1", "expectedRevision": 2}),
+            (
+                "changePlan",
+                {"subscriptionId": "subscription-1", "targetOfferVersionId": "offer-2", "expectedRevision": 1},
+                {
+                    "subscriptionId": "subscription-1",
+                    "targetOfferVersionId": "offer-2",
+                    "expectedRevision": 1,
+                    "planChangePolicy": {"mode": "immediate-prorated"},
+                    "previewTimestamp": NOW,
+                },
+            ),
+            (
+                "applyDiscount",
+                {"subscriptionId": "subscription-1", "discountVersionId": "discount-1", "expectedRevision": 1},
+                {"subscriptionId": "subscription-1", "discountVersionId": "discount-1", "expectedRevision": 1},
+            ),
+            (
+                "pause",
+                {"subscriptionId": "subscription-1", "expectedRevision": 1},
+                {"subscriptionId": "subscription-1", "expectedRevision": 1, "pausePolicy": pause_policy()},
+            ),
+            (
+                "resume",
+                {"subscriptionId": "subscription-1", "expectedRevision": 2},
+                {"subscriptionId": "subscription-1", "expectedRevision": 2, "pausePolicy": pause_policy()},
+            ),
         )
-        for operation, input_value in cases:
+        for operation, input_value, expected_forwarded in cases:
             with self.subTest(operation=operation):
                 response, authorize = self.call({"operation": operation, "input": input_value})
                 body = json.loads(response["body"])
@@ -163,22 +201,22 @@ class SubscriptionBoundaryTests(unittest.TestCase):
                 self.assertTrue(authorize.call_args.kwargs["mutation"])
                 _, scope, forwarded, metadata = self.gateway.calls[-1]
                 self.assertEqual((scope.environment, scope.tenant_id, scope.draft_id, scope.domain), ("test", TENANT_ID, DRAFT_ID, DOMAIN))
-                self.assertEqual(forwarded, input_value)
+                self.assertEqual(forwarded, expected_forwarded)
                 self.assertEqual(metadata["idempotency_key"], "subscription-operation-1")
                 self.assertNotIn("provider", repr(self.gateway.calls[-1]).lower())
 
     def test_unknown_browser_coordinates_policy_disabled_and_unavailable_gateway_fail_closed(self):
         invalid = {
             "operation": "pause",
-            "input": {"subscriptionId": "subscription-1", "expectedRevision": 1, "billingBehavior": "void", "accessBehavior": "pause"},
+            "input": {"subscriptionId": "subscription-1", "expectedRevision": 1},
             "tenantId": "other",
         }
         response, _ = self.call(invalid)
         self.assertEqual(response["statusCode"], 400)
         self.assertEqual(self.gateway.calls, [])
 
-        self.policies.commerce["commerce"]["payments"]["operatorPauses"] = False
-        response, _ = self.call({"operation": "pause", "input": {"subscriptionId": "subscription-1", "expectedRevision": 1, "billingBehavior": "void", "accessBehavior": "pause"}})
+        self.policies.commerce["commerce"]["payments"]["pausePolicy"] = {"enabled": False}
+        response, _ = self.call({"operation": "pause", "input": {"subscriptionId": "subscription-1", "expectedRevision": 1}})
         self.assertEqual(response["statusCode"], 403)
         self.assertEqual(self.gateway.calls, [])
 
@@ -201,25 +239,74 @@ class SubscriptionBoundaryTests(unittest.TestCase):
                 self.assertEqual(self.gateway.calls, [])
 
     def test_authentication_runs_before_policy_feature_disclosure(self):
-        self.policies.commerce["commerce"]["payments"]["operatorPauses"] = False
+        self.policies.commerce["commerce"]["payments"]["pausePolicy"] = {"enabled": False}
         response, _ = self.call(
-            {"operation": "pause", "input": {"subscriptionId": "subscription-1", "expectedRevision": 1, "billingBehavior": "void", "accessBehavior": "pause"}},
+            {"operation": "pause", "input": {"subscriptionId": "subscription-1", "expectedRevision": 1}},
             authorize_error=AuthenticationError("private"),
         )
         self.assertEqual(response["statusCode"], 401)
 
-    def test_invalid_gateway_result_and_nonpositive_resume_time_are_safe_errors(self):
-        response, _ = self.call({
-            "operation": "pause",
-            "input": {"subscriptionId": "subscription-1", "expectedRevision": 1, "billingBehavior": "void", "accessBehavior": "pause", "resumeAt": 0},
-        })
-        self.assertEqual(response["statusCode"], 400)
-        self.assertEqual(self.gateway.calls, [])
-
+    def test_invalid_gateway_result_is_a_safe_error(self):
         self.gateway.execute = lambda *args, **kwargs: {"commandId": "HTTPS://provider.invalid", "status": "accepted"}
         response, _ = self.call({"operation": "resume", "input": {"subscriptionId": "subscription-1", "expectedRevision": 1}})
         self.assertEqual(response["statusCode"], 503)
         self.assertNotIn("provider.invalid", response["body"])
+
+    def test_browser_cannot_inject_billing_provider_or_cross_draft_fields(self):
+        forbidden_inputs = (
+            ("changePlan", {"subscriptionId": "subscription-1", "targetOfferVersionId": "offer-2", "expectedRevision": 1, "proration": "prorate"}),
+            ("changePlan", {"subscriptionId": "subscription-1", "targetOfferVersionId": "offer-2", "expectedRevision": 1, "previewTimestamp": NOW}),
+            ("changePlan", {"subscriptionId": "subscription-1", "targetOfferVersionId": "offer-2", "expectedRevision": 1, "stripePriceId": "price-synthetic"}),
+            ("pause", {"subscriptionId": "subscription-1", "expectedRevision": 1, "billingBehavior": "void"}),
+            ("pause", {"subscriptionId": "subscription-1", "expectedRevision": 1, "accessBehavior": "suspend"}),
+            ("pause", {"subscriptionId": "subscription-1", "expectedRevision": 1, "resumeAt": NOW + 3600}),
+            ("resume", {"subscriptionId": "subscription-1", "expectedRevision": 1, "provider": "stripe"}),
+            ("resume", {"subscriptionId": "subscription-1", "expectedRevision": 1, "stripeSubscriptionId": "sub-synthetic"}),
+            ("resume", {"subscriptionId": "subscription-1", "expectedRevision": 1, "draftId": "draft-other"}),
+        )
+        for operation, input_value in forbidden_inputs:
+            with self.subTest(operation=operation, field=set(input_value) - {"subscriptionId", "targetOfferVersionId", "expectedRevision"}):
+                self.gateway.calls.clear()
+                response, _ = self.call({"operation": operation, "input": input_value})
+                self.assertEqual(response["statusCode"], 400)
+                self.assertEqual(self.gateway.calls, [])
+
+    def test_missing_invalid_and_disabled_policies_fail_closed_without_gateway(self):
+        cases = (
+            ("changePlan", "planChangePolicy", None, 503),
+            ("changePlan", "planChangePolicy", {"mode": "operator-selectable"}, 503),
+            ("changePlan", "planChangePolicy", {"mode": "disabled"}, 403),
+            ("pause", "pausePolicy", None, 503),
+            ("pause", "pausePolicy", {**pause_policy(), "newInvoiceBehavior": "draft"}, 503),
+            ("pause", "pausePolicy", {"enabled": False}, 403),
+            ("resume", "pausePolicy", {"enabled": False}, 403),
+        )
+        for operation, policy_name, policy_value, expected_status in cases:
+            with self.subTest(operation=operation, policy=policy_value):
+                self.policies = policies()
+                payments = self.policies.commerce["commerce"]["payments"]
+                if policy_value is None:
+                    del payments[policy_name]
+                else:
+                    payments[policy_name] = policy_value
+                self.gateway.calls.clear()
+                input_value = {"subscriptionId": "subscription-1", "expectedRevision": 1}
+                if operation == "changePlan":
+                    input_value["targetOfferVersionId"] = "offer-2"
+                response, _ = self.call({"operation": operation, "input": input_value})
+                self.assertEqual(response["statusCode"], expected_status)
+                self.assertEqual(self.gateway.calls, [])
+
+    def test_next_renewal_does_not_create_a_preview_timestamp(self):
+        self.policies.commerce["commerce"]["payments"]["planChangePolicy"] = {"mode": "next-renewal"}
+        response, _ = self.call({
+            "operation": "changePlan",
+            "input": {"subscriptionId": "subscription-1", "targetOfferVersionId": "offer-2", "expectedRevision": 1},
+        })
+        self.assertEqual(response["statusCode"], 200)
+        forwarded = self.gateway.calls[0][2]
+        self.assertEqual(forwarded["planChangePolicy"], {"mode": "next-renewal"})
+        self.assertNotIn("previewTimestamp", forwarded)
 
     def test_verified_subscription_projection_is_idempotent_scope_bound_and_contains_no_pii(self):
         backend = FakeBackend()

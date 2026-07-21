@@ -37,8 +37,18 @@ def commerce_policy(environment="test"):
                 "subscriptions": True,
                 "editablePrices": True,
                 "coupons": True,
-                "operatorPauses": True,
-                "proration": "operator-selectable",
+                "planChangePolicy": {"mode": "immediate-prorated"},
+                "pausePolicy": {
+                    "enabled": True,
+                    "newInvoiceBehavior": "void",
+                    "existingInvoiceBehavior": "unchanged",
+                    "accessBehavior": "suspend",
+                    "resume": {"mode": "manual"},
+                    "onResume": {
+                        "collection": "restore",
+                        "access": "restore-if-suspended",
+                    },
+                },
             },
             "inventory": {
                 "enabled": True,
@@ -373,6 +383,13 @@ class PublishedPolicyResolverTests(unittest.TestCase):
             (("commerce", "payments", "supportedCurrencies"), ["MXN", "MXN"]),
             (("commerce", "payments", "supportedCurrencies"), ["mxn"]),
             (("commerce", "payments", "supportedCurrencies"), [f"AA{chr(65 + index)}" for index in range(17)]),
+            (("commerce", "payments", "planChangePolicy", "mode"), "operator-selectable"),
+            (("commerce", "payments", "pausePolicy", "newInvoiceBehavior"), "draft"),
+            (("commerce", "payments", "pausePolicy", "existingInvoiceBehavior"), "retry"),
+            (("commerce", "payments", "pausePolicy", "accessBehavior"), "pause"),
+            (("commerce", "payments", "pausePolicy", "resume", "mode"), "scheduled"),
+            (("commerce", "payments", "pausePolicy", "onResume", "collection"), "retry"),
+            (("commerce", "payments", "pausePolicy", "onResume", "access"), "grant"),
             (("commerce", "inventory", "backorders"), True),
             (("commerce", "shipping", "methods"), ["carrier-api"]),
             (("commerce", "checkout", "successPath"), "https://example.com/success"),
@@ -384,6 +401,29 @@ class PublishedPolicyResolverTests(unittest.TestCase):
                 self.s3.objects[self.commerce_key] = mutate(path, value)
                 with self.assertRaises(PolicyResolutionError):
                     self.resolve()
+
+    def test_subscription_policies_are_required_and_closed(self):
+        from src.common.published_policy import PolicyResolutionError
+
+        payments = self.s3.objects[self.commerce_key]["commerce"]["payments"]
+        del payments["planChangePolicy"]
+        with self.assertRaises(PolicyResolutionError):
+            self.resolve()
+
+        self.setUp()
+        payments = self.s3.objects[self.commerce_key]["commerce"]["payments"]
+        del payments["pausePolicy"]
+        with self.assertRaises(PolicyResolutionError):
+            self.resolve()
+
+        self.setUp()
+        self.s3.objects[self.commerce_key]["commerce"]["payments"]["pausePolicy"] = {
+            "enabled": False,
+        }
+        self.assertEqual(
+            self.resolve().commerce["commerce"]["payments"]["pausePolicy"],
+            {"enabled": False},
+        )
 
     def test_requires_currency_policy_and_allows_at_most_one_notification_policy(self):
         from src.common.published_policy import PolicyResolutionError

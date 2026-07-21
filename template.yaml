@@ -1137,6 +1137,7 @@ Resources:
             Ref: ConfigPayloadsBucketName
           ENVIRONMENT_NAME:
             Ref: EnvironmentName
+          TEST_PREVIEW_ORIGIN: https://test.zoolandingpage.com.mx
       Events:
         Checkout:
           Type: Api

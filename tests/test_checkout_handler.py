@@ -1,5 +1,7 @@
 import base64
+from dataclasses import replace
 import importlib.util
+import os
 import unittest
 from unittest.mock import patch
 
@@ -10,13 +12,18 @@ PUBLIC_CHECKOUT_RECOVERY_KEY = base64.urlsafe_b64encode(b"r" * 32).decode("ascii
 
 
 def checkout_event(payload, *, headers=None):
-    merged_headers = {"idempotency-key": PUBLIC_CHECKOUT_RECOVERY_KEY}
+    merged_headers = {
+        "idempotency-key": PUBLIC_CHECKOUT_RECOVERY_KEY,
+        "origin": "https://test.zoolandingpage.com.mx",
+    }
     merged_headers.update(headers or {})
-    return api_event(
+    event = api_event(
         "/features/commerce/public-action",
         payload,
         headers=merged_headers,
     )
+    event["queryStringParameters"] = {"draftDomain": "example.com"}
+    return event
 
 
 class FakeCatalog:
@@ -73,6 +80,13 @@ def offer_and_item(*, sellable_type="service", recurring=False, variant_id=None)
     )
 
 
+@patch.dict(
+    os.environ,
+    {
+        "ENVIRONMENT_NAME": "test",
+        "TEST_PREVIEW_ORIGIN": "https://test.zoolandingpage.com.mx",
+    },
+)
 class CheckoutHandlerContractTests(unittest.TestCase):
     def test_checkout_handler_exists(self):
         self.assertIsNotNone(importlib.util.find_spec("src.handlers.checkout"))
@@ -229,10 +243,19 @@ class CheckoutHandlerContractTests(unittest.TestCase):
                 self.assertEqual(response["statusCode"], 400)
                 resolver.assert_not_called()
 
-    def test_checkout_requires_one_exact_https_same_origin_before_policy_or_storage(self):
+    def test_checkout_requires_the_owned_test_front_door_before_policy_or_storage(self):
         from src.handlers import checkout
 
-        cases = (None, "null", "http://example.com", "https://attacker.invalid", "https://example.com https://attacker.invalid")
+        cases = (
+            None,
+            "null",
+            "http://test.zoolandingpage.com.mx",
+            "https://example.com",
+            "https://attacker.invalid",
+            "http://127.0.0.1:4200",
+            "https://localhost",
+            "https://test.zoolandingpage.com.mx https://attacker.invalid",
+        )
         for origin in cases:
             with self.subTest(origin=origin), patch.object(checkout, "resolve_checkout_policy") as resolver:
                 event = checkout_event(
@@ -246,6 +269,62 @@ class CheckoutHandlerContractTests(unittest.TestCase):
 
             self.assertEqual(response["statusCode"], 403)
             resolver.assert_not_called()
+
+    def test_test_front_door_requires_the_exact_expected_draft_domain_binding(self):
+        from src.handlers import checkout
+
+        payload = {
+            "operation": "admitCheckout",
+            "input": {"lines": [{"offerVersionId": "offer-1", "quantity": 1}]},
+        }
+        for query in (
+            None,
+            {},
+            {"draftDomain": "other.example.com"},
+            {"draftDomain": "example.com", "other": "unexpected"},
+        ):
+            with self.subTest(query=query), patch.object(checkout, "resolve_checkout_policy") as resolver:
+                event = checkout_event(payload)
+                event["queryStringParameters"] = query
+                response = checkout.lambda_handler(event, None)
+            self.assertEqual(response["statusCode"], 403)
+            resolver.assert_not_called()
+
+    def test_production_accepts_only_the_exact_canonical_origin_and_no_preview_binding(self):
+        from src.handlers import checkout
+
+        payload = {
+            "operation": "admitCheckout",
+            "input": {"lines": [{"offerVersionId": "offer-1", "quantity": 1}]},
+        }
+        policies = resolved_policies()
+        policies.commerce["scope"]["environment"] = "production"
+        policies.commerce["commerce"]["notificationPolicyIds"] = []
+        policies = replace(policies, environment="production")
+        catalog = FakeCatalog({"offer-1": offer_and_item()})
+        commerce = FakeCommerce()
+        with (
+            patch.dict(os.environ, {"ENVIRONMENT_NAME": "prod"}),
+            patch.object(checkout, "resolve_checkout_policy", return_value=policies),
+            patch.object(checkout, "_catalog_store", return_value=catalog),
+            patch.object(checkout, "_commerce_store", return_value=commerce),
+        ):
+            valid = checkout_event(payload, headers={"origin": "https://example.com"})
+            valid["queryStringParameters"] = None
+            accepted = checkout.lambda_handler(valid, None)
+
+            arbitrary = checkout_event(payload, headers={"origin": "https://example.com"})
+            arbitrary["queryStringParameters"] = {"draftDomain": "other.example.com"}
+            rejected_query = checkout.lambda_handler(arbitrary, None)
+
+            wrong_origin = checkout_event(payload, headers={"origin": "https://test.zoolandingpage.com.mx"})
+            wrong_origin["queryStringParameters"] = None
+            rejected_origin = checkout.lambda_handler(wrong_origin, None)
+
+        self.assertEqual(accepted["statusCode"], 200)
+        self.assertEqual(rejected_query["statusCode"], 403)
+        self.assertEqual(rejected_origin["statusCode"], 403)
+        self.assertEqual(len(commerce.calls), 1)
 
     def test_fiscal_enabled_checkout_returns_one_opaque_proof_and_persists_only_its_hash(self):
         from src.handlers import checkout

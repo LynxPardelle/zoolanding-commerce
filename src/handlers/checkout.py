@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import time
 from typing import Any
 
@@ -59,6 +60,7 @@ except ModuleNotFoundError:
 
 
 PATH = "/features/commerce/public-action"
+OWNED_TEST_PREVIEW_ORIGIN = "https://test.zoolandingpage.com.mx"
 
 
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
@@ -89,8 +91,7 @@ def _handle(event: dict[str, Any], payload: dict[str, Any], request_id: str) -> 
     idempotency_key = public_checkout_idempotency_header(event)
 
     domain = domain_header(event)
-    if header(event, "origin") != f"https://{domain}":
-        raise HttpError(403, "forbidden", "You do not have access to this resource.")
+    _validate_origin_binding(event, domain)
     policies = resolve_checkout_policy(domain)
     commerce = validated_commerce(policies)
     scope = resolved_scope(policies)
@@ -167,6 +168,36 @@ def _handle(event: dict[str, Any], payload: dict[str, Any], request_id: str) -> 
         result["fiscalAccessProof"] = fiscal_proof
         result["fiscalAccessState"] = "pending_payment"
     return result
+
+
+def _validate_origin_binding(event: dict[str, Any], domain: str) -> None:
+    environment = os.getenv("ENVIRONMENT_NAME", "").strip().lower()
+    if environment == "prod":
+        environment = "production"
+    origin = header(event, "origin")
+    query = event.get("queryStringParameters")
+    if query is None:
+        query = {}
+    if not isinstance(query, dict) or any(
+        type(key) is not str or type(value) is not str
+        for key, value in query.items()
+    ):
+        raise _origin_forbidden()
+    if environment == "production":
+        if origin != f"https://{domain}" or query:
+            raise _origin_forbidden()
+        return
+    if environment != "test":
+        raise policy_unavailable()
+    configured_origin = os.getenv("TEST_PREVIEW_ORIGIN", "").strip()
+    if configured_origin != OWNED_TEST_PREVIEW_ORIGIN:
+        raise policy_unavailable()
+    if origin != configured_origin or query != {"draftDomain": domain}:
+        raise _origin_forbidden()
+
+
+def _origin_forbidden() -> HttpError:
+    return HttpError(403, "forbidden", "You do not have access to this resource.")
 
 
 def _new_id(prefix: str, scope: CommerceScope, idempotency_key: str, index: int | None = None) -> str:

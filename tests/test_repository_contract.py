@@ -198,6 +198,12 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertNotIn("/features/commerce/action", routes.values())
         self.assertTrue(all("*" not in path for path in routes.values()))
 
+        checkout_environment = resources["CheckoutFunction"]["Properties"]["Environment"]["Variables"]
+        self.assertEqual(
+            checkout_environment["TEST_PREVIEW_ORIGIN"],
+            "https://test.zoolandingpage.com.mx",
+        )
+
     def test_template_keeps_public_catalog_catalog_only_and_fiscal_iam_isolated(self):
         resources = load_template()["Resources"]
 

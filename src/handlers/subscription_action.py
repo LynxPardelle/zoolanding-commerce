@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from typing import Any
 
 try:  # Lambda CodeUri is src/.
@@ -19,7 +20,11 @@ try:  # Lambda CodeUri is src/.
         validated_commerce,
         validation_error,
     )
-    from common.published_policy import resolve_policies
+    from common.published_policy import (
+        resolve_policies,
+        validated_pause_policy,
+        validated_plan_change_policy,
+    )
 except ModuleNotFoundError:  # Repository-root tests import src.*.
     from src.common.auth_admin import authorize_request
     from src.common.http import (
@@ -34,15 +39,16 @@ except ModuleNotFoundError:  # Repository-root tests import src.*.
         validated_commerce,
         validation_error,
     )
-    from src.common.published_policy import resolve_policies
+    from src.common.published_policy import (
+        resolve_policies,
+        validated_pause_policy,
+        validated_plan_change_policy,
+    )
 
 
 PATH = "/features/commerce/subscription/action"
 CAPABILITY = "commerce:subscription:manage"
 OPERATIONS = frozenset({"changePlan", "applyDiscount", "pause", "resume"})
-PRORATION = frozenset({"none", "prorate"})
-BILLING_BEHAVIORS = frozenset({"void", "draft", "uncollectible"})
-ACCESS_BEHAVIORS = frozenset({"pause", "continue"})
 
 
 class UnavailableSubscriptionGateway:
@@ -76,11 +82,11 @@ def _handle(event: dict[str, Any], payload: dict[str, Any], request_id: str) -> 
         capability=CAPABILITY,
         mutation=True,
     )
-    _require_policy(operation, input_value, commerce)
+    command_input = _command_input(operation, input_value, commerce)
     result = _gateway().execute(
         operation,
         resolved_scope(policies),
-        input_value,
+        command_input,
         idempotency_key=idempotency_key,
         request_id=request_id,
         actor_hash=hashlib.sha256(context.subject.encode("utf-8")).hexdigest(),
@@ -92,29 +98,15 @@ def _validated_input(operation: str, value: Any) -> dict[str, Any]:
     if operation == "changePlan":
         item = closed_object(
             value,
-            {"subscriptionId", "targetOfferVersionId", "expectedRevision", "proration"},
+            {"subscriptionId", "targetOfferVersionId", "expectedRevision"},
         )
         safe_id(item["targetOfferVersionId"])
-        if type(item["proration"]) is not str or item["proration"] not in PRORATION:
-            raise validation_error()
     elif operation == "applyDiscount":
         item = closed_object(
             value,
             {"subscriptionId", "discountVersionId", "expectedRevision"},
         )
         safe_id(item["discountVersionId"])
-    elif operation == "pause":
-        item = closed_object(
-            value,
-            {"subscriptionId", "expectedRevision", "billingBehavior", "accessBehavior"},
-            {"resumeAt"},
-        )
-        if type(item["billingBehavior"]) is not str or item["billingBehavior"] not in BILLING_BEHAVIORS:
-            raise validation_error()
-        if type(item["accessBehavior"]) is not str or item["accessBehavior"] not in ACCESS_BEHAVIORS:
-            raise validation_error()
-        if "resumeAt" in item:
-            positive_int(item["resumeAt"])
     else:
         item = closed_object(value, {"subscriptionId", "expectedRevision"})
     safe_id(item["subscriptionId"])
@@ -122,20 +114,42 @@ def _validated_input(operation: str, value: Any) -> dict[str, Any]:
     return item
 
 
-def _require_policy(operation: str, input_value: dict[str, Any], commerce: dict[str, Any]) -> None:
+def _command_input(
+    operation: str,
+    input_value: dict[str, Any],
+    commerce: dict[str, Any],
+) -> dict[str, Any]:
     payments = commerce.get("payments")
     if not isinstance(payments, dict) or payments.get("subscriptions") is not True:
-        raise HttpError(403, "forbidden", "You do not have access to this resource.")
+        raise _forbidden()
     if operation == "applyDiscount" and payments.get("coupons") is not True:
-        raise HttpError(403, "forbidden", "You do not have access to this resource.")
-    if operation in {"pause", "resume"} and payments.get("operatorPauses") is not True:
-        raise HttpError(403, "forbidden", "You do not have access to this resource.")
+        raise _forbidden()
+    command_input = dict(input_value)
     if operation == "changePlan":
-        proration = payments.get("proration")
-        if proration not in {"disabled", "operator-selectable"}:
-            raise HttpError(503, "upstream_unavailable", "Service temporarily unavailable.", retryable=True)
-        if input_value["proration"] == "prorate" and proration != "operator-selectable":
-            raise HttpError(403, "forbidden", "You do not have access to this resource.")
+        policy = validated_plan_change_policy(payments.get("planChangePolicy"))
+        if policy["mode"] == "disabled":
+            raise _forbidden()
+        command_input["planChangePolicy"] = policy
+        if policy["mode"] == "immediate-prorated":
+            preview_timestamp = int(time.time())
+            if preview_timestamp < 1:
+                raise HttpError(
+                    503,
+                    "upstream_unavailable",
+                    "Service temporarily unavailable.",
+                    retryable=True,
+                )
+            command_input["previewTimestamp"] = preview_timestamp
+    elif operation in {"pause", "resume"}:
+        policy = validated_pause_policy(payments.get("pausePolicy"))
+        if policy["enabled"] is not True:
+            raise _forbidden()
+        command_input["pausePolicy"] = policy
+    return command_input
+
+
+def _forbidden() -> HttpError:
+    return HttpError(403, "forbidden", "You do not have access to this resource.")
 
 
 def _validated_gateway_result(value: Any) -> dict[str, str]:

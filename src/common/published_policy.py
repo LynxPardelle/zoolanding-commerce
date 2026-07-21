@@ -364,8 +364,8 @@ def _validate_payments(value: Any) -> dict[str, Any]:
         "subscriptions",
         "editablePrices",
         "coupons",
-        "operatorPauses",
-        "proration",
+        "planChangePolicy",
+        "pausePolicy",
     }
     if not isinstance(value, dict) or set(value) != keys:
         raise PolicyResolutionError("Published Commerce policy is invalid")
@@ -380,12 +380,81 @@ def _validate_payments(value: Any) -> dict[str, Any]:
         raise PolicyResolutionError("Published Commerce policy is invalid")
     if any(
         type(value.get(key)) is not bool
-        for key in keys - {"bindingId", "supportedCurrencies", "proration"}
+        for key in keys
+        - {
+            "bindingId",
+            "supportedCurrencies",
+            "planChangePolicy",
+            "pausePolicy",
+        }
     ):
         raise PolicyResolutionError("Published Commerce policy is invalid")
-    if value.get("proration") not in {"disabled", "operator-selectable"}:
-        raise PolicyResolutionError("Published Commerce policy is invalid")
+    validated_plan_change_policy(value.get("planChangePolicy"))
+    validated_pause_policy(value.get("pausePolicy"))
     return value
+
+
+def validated_plan_change_policy(value: Any) -> dict[str, str]:
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"mode"}
+        or value.get("mode")
+        not in {"disabled", "next-renewal", "immediate-prorated"}
+    ):
+        raise PolicyResolutionError("Published Commerce policy is invalid")
+    return {"mode": value["mode"]}
+
+
+def validated_pause_policy(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or type(value.get("enabled")) is not bool:
+        raise PolicyResolutionError("Published Commerce policy is invalid")
+    if value["enabled"] is False:
+        if set(value) != {"enabled"}:
+            raise PolicyResolutionError("Published Commerce policy is invalid")
+        return {"enabled": False}
+    if set(value) != {
+        "enabled",
+        "newInvoiceBehavior",
+        "existingInvoiceBehavior",
+        "accessBehavior",
+        "resume",
+        "onResume",
+    }:
+        raise PolicyResolutionError("Published Commerce policy is invalid")
+    if value.get("newInvoiceBehavior") not in {
+        "void",
+        "keep-as-draft",
+        "mark-uncollectible",
+    }:
+        raise PolicyResolutionError("Published Commerce policy is invalid")
+    if value.get("existingInvoiceBehavior") != "unchanged":
+        raise PolicyResolutionError("Published Commerce policy is invalid")
+    if value.get("accessBehavior") not in {"retain", "suspend"}:
+        raise PolicyResolutionError("Published Commerce policy is invalid")
+    resume = value.get("resume")
+    if (
+        not isinstance(resume, dict)
+        or set(resume) != {"mode"}
+        or resume.get("mode") != "manual"
+    ):
+        raise PolicyResolutionError("Published Commerce policy is invalid")
+    on_resume = value.get("onResume")
+    if on_resume != {
+        "collection": "restore",
+        "access": "restore-if-suspended",
+    }:
+        raise PolicyResolutionError("Published Commerce policy is invalid")
+    return {
+        "enabled": True,
+        "newInvoiceBehavior": value["newInvoiceBehavior"],
+        "existingInvoiceBehavior": "unchanged",
+        "accessBehavior": value["accessBehavior"],
+        "resume": {"mode": "manual"},
+        "onResume": {
+            "collection": "restore",
+            "access": "restore-if-suspended",
+        },
+    }
 
 
 def _validate_inventory(value: Any) -> dict[str, Any]:
