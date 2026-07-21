@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: Local-only storage foundation for the Zoolanding Commerce service.
+Description: Zoolanding generic draft-scoped Commerce service.
 
 Parameters:
   EnvironmentName:
@@ -8,6 +8,51 @@ Parameters:
     AllowedValues:
       - test
       - prod
+  ConfigRegistryTableName:
+    Type: String
+    MinLength: 3
+    MaxLength: 255
+    AllowedPattern: ^[A-Za-z0-9_.-]+$
+  ConfigPayloadsBucketName:
+    Type: String
+    MinLength: 3
+    MaxLength: 63
+    AllowedPattern: ^[a-z0-9][a-z0-9.-]*[a-z0-9]$
+  AuthSessionTableName:
+    Type: String
+    MinLength: 3
+    MaxLength: 255
+    AllowedPattern: ^[A-Za-z0-9_.-]+$
+  AuthUserStateTableName:
+    Type: String
+    MinLength: 3
+    MaxLength: 255
+    AllowedPattern: ^[A-Za-z0-9_.-]+$
+  IntegrationEventsTopicArn:
+    Type: String
+    AllowedPattern: ^arn:[A-Za-z0-9-]+:sns:[A-Za-z0-9-]+:[0-9]{12}:[A-Za-z0-9_.-]+$
+  FiscalProductionApproved:
+    Type: String
+    AllowedValues:
+      - 'false'
+      - 'true'
+    Default: 'false'
+  FiscalRetentionApprovalId:
+    Type: String
+    MaxLength: 64
+    AllowedPattern: ^$|^[a-z0-9][a-z0-9._-]{0,63}$
+    Default: ''
+  FiscalAccessApprovalId:
+    Type: String
+    MaxLength: 64
+    AllowedPattern: ^$|^[a-z0-9][a-z0-9._-]{0,63}$
+    Default: ''
+  CommerceCursorSigningKey:
+    Type: String
+    NoEcho: true
+    MinLength: 32
+    MaxLength: 128
+    AllowedPattern: ^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-][AQgw]|[A-Za-z0-9_-]{2}[AEIMQUYcgkosw048])?$
 
 Globals:
   Function:
@@ -16,8 +61,62 @@ Globals:
       - arm64
     MemorySize: 256
     Timeout: 10
+    LoggingConfig:
+      LogFormat: JSON
+      LogGroup:
+        Ref: CommerceLogGroup
+    Tags:
+      Project: Zoolandingpage
+      Component: Commerce
+      ManagedBy: SAM
+      Environment:
+        Ref: EnvironmentName
 
 Resources:
+  CommerceLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Sub: /zoolanding/commerce/${EnvironmentName}
+      RetentionInDays: 30
+      Tags:
+        - Key: Project
+          Value: Zoolandingpage
+        - Key: Component
+          Value: Commerce
+        - Key: CostCenter
+          Value: Commerce
+        - Key: ManagedBy
+          Value: SAM
+        - Key: Environment
+          Value:
+            Ref: EnvironmentName
+
+  CommerceApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName:
+        Ref: EnvironmentName
+      MethodSettings:
+        - HttpMethod: POST
+          ResourcePath: /~1features~1commerce~1public-read
+          ThrottlingRateLimit: 25
+          ThrottlingBurstLimit: 50
+        - HttpMethod: POST
+          ResourcePath: /~1features~1commerce~1public-action
+          ThrottlingRateLimit: 10
+          ThrottlingBurstLimit: 20
+        - HttpMethod: POST
+          ResourcePath: /~1features~1commerce~1fiscal~1request
+          ThrottlingRateLimit: 5
+          ThrottlingBurstLimit: 10
+      Tags:
+        Project: Zoolandingpage
+        Component: Commerce
+        ManagedBy: SAM
+        Environment:
+          Ref: EnvironmentName
+
   CommerceCatalogTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Retain
@@ -36,11 +135,24 @@ Resources:
           AttributeType: S
         - AttributeName: sk
           AttributeType: S
+        - AttributeName: duePartition
+          AttributeType: S
+        - AttributeName: dueKey
+          AttributeType: S
       KeySchema:
         - AttributeName: pk
           KeyType: HASH
         - AttributeName: sk
           KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: ReservationDueIndex
+          KeySchema:
+            - AttributeName: duePartition
+              KeyType: HASH
+            - AttributeName: dueKey
+              KeyType: RANGE
+          Projection:
+            ProjectionType: KEYS_ONLY
       Tags:
         - Key: Project
           Value: Zoolandingpage
@@ -118,3 +230,1151 @@ Resources:
         - Key: Environment
           Value:
             Ref: EnvironmentName
+
+  CommerceNotificationRequestsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Tags:
+        - Key: Project
+          Value: Zoolandingpage
+        - Key: Component
+          Value: CommerceNotifications
+        - Key: ManagedBy
+          Value: SAM
+        - Key: Environment
+          Value:
+            Ref: EnvironmentName
+
+  CommerceIntegrationEventsDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Project
+          Value: Zoolandingpage
+        - Key: Component
+          Value: CommerceIntegrationEventsDlq
+        - Key: CostCenter
+          Value: Commerce
+        - Key: ManagedBy
+          Value: SAM
+        - Key: Environment
+          Value:
+            Ref: EnvironmentName
+
+  CommerceIntegrationEventsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      VisibilityTimeout: 60
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn:
+          Fn::GetAtt:
+            - CommerceIntegrationEventsDlq
+            - Arn
+        maxReceiveCount: 5
+      Tags:
+        - Key: Project
+          Value: Zoolandingpage
+        - Key: Component
+          Value: CommerceIntegrationEvents
+        - Key: CostCenter
+          Value: Commerce
+        - Key: ManagedBy
+          Value: SAM
+        - Key: Environment
+          Value:
+            Ref: EnvironmentName
+
+  CommerceOutboxFailureQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Project
+          Value: Zoolandingpage
+        - Key: Component
+          Value: CommerceOutboxFailure
+        - Key: CostCenter
+          Value: Commerce
+        - Key: ManagedBy
+          Value: SAM
+        - Key: Environment
+          Value:
+            Ref: EnvironmentName
+
+  CommerceIntegrationEventsQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - Ref: CommerceIntegrationEventsQueue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource:
+              Fn::GetAtt:
+                - CommerceIntegrationEventsQueue
+                - Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn:
+                  Ref: IntegrationEventsTopicArn
+
+  CommerceIntegrationEventsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: sqs
+      Endpoint:
+        Fn::GetAtt:
+          - CommerceIntegrationEventsQueue
+          - Arn
+      RawMessageDelivery: true
+      FilterPolicyScope: MessageBody
+      FilterPolicy:
+        eventType:
+          - commerce.payment.succeeded.v1
+          - commerce.payment.terminal_unpaid.v1
+          - commerce.refund.confirmed.v1
+          - commerce.subscription.updated.v1
+      TopicArn:
+        Ref: IntegrationEventsTopicArn
+
+  IntegrationEventWorkerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CommerceIntegrationEventWorker
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  Fn::GetAtt:
+                    - CommerceLogGroup
+                    - Arn
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource:
+                  Fn::GetAtt:
+                    - CommerceIntegrationEventsQueue
+                    - Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:TransactWriteItems
+                Resource:
+                  - Fn::GetAtt:
+                      - CommerceCatalogTable
+                      - Arn
+                  - Fn::GetAtt:
+                      - CommerceOperationsTable
+                      - Arn
+      Tags:
+        - Key: Project
+          Value: Zoolandingpage
+        - Key: Component
+          Value: CommerceIntegrationEvents
+        - Key: CostCenter
+          Value: Commerce
+        - Key: ManagedBy
+          Value: SAM
+        - Key: Environment
+          Value:
+            Ref: EnvironmentName
+
+  OutboxRelayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CommerceOutboxRelay
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  Fn::GetAtt:
+                    - CommerceLogGroup
+                    - Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:DescribeStream
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:ListStreams
+                Resource:
+                  Fn::Sub:
+                    - ${OperationsArn}/stream/*
+                    - OperationsArn:
+                        Fn::GetAtt:
+                          - CommerceOperationsTable
+                          - Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:TransactWriteItems
+                Resource:
+                  Fn::GetAtt:
+                    - CommerceOperationsTable
+                    - Arn
+              - Effect: Allow
+                Action: sns:Publish
+                Resource:
+                  Ref: CommerceNotificationRequestsTopic
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource:
+                  Fn::GetAtt:
+                    - CommerceOutboxFailureQueue
+                    - Arn
+      Tags:
+        - Key: Project
+          Value: Zoolandingpage
+        - Key: Component
+          Value: CommerceOutboxRelay
+        - Key: CostCenter
+          Value: Commerce
+        - Key: ManagedBy
+          Value: SAM
+        - Key: Environment
+          Value:
+            Ref: EnvironmentName
+
+  CatalogPublicReadRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CommerceCatalogPublicRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  Fn::GetAtt:
+                    - CommerceLogGroup
+                    - Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource:
+                  Fn::GetAtt:
+                    - CommerceCatalogTable
+                    - Arn
+              - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ConfigRegistryTableName}
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:s3:::${ConfigPayloadsBucketName}/sites/*/versions/*/*/server/commerce.json
+      Tags:
+        - Key: Project
+          Value: Zoolandingpage
+        - Key: Component
+          Value: CommerceCatalogPublicRead
+        - Key: CostCenter
+          Value: Commerce
+        - Key: ManagedBy
+          Value: SAM
+        - Key: Environment
+          Value:
+            Ref: EnvironmentName
+
+  CatalogReadRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CommerceCatalogRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  Fn::GetAtt:
+                    - CommerceLogGroup
+                    - Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource:
+                  Fn::GetAtt:
+                    - CommerceCatalogTable
+                    - Arn
+              - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource:
+                  - Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ConfigRegistryTableName}
+                  - Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AuthSessionTableName}
+                  - Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AuthUserStateTableName}
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource:
+                  - Fn::Sub: arn:${AWS::Partition}:s3:::${ConfigPayloadsBucketName}/sites/*/versions/*/*/server/commerce.json
+                  - Fn::Sub: arn:${AWS::Partition}:s3:::${ConfigPayloadsBucketName}/sites/*/versions/*/*/server/auth-profile-registry.json
+      Tags:
+        - Key: Project
+          Value: Zoolandingpage
+        - Key: Component
+          Value: CommerceCatalogRead
+        - Key: CostCenter
+          Value: Commerce
+        - Key: ManagedBy
+          Value: SAM
+        - Key: Environment
+          Value:
+            Ref: EnvironmentName
+
+  CatalogActionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CommerceCatalogAction
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  Fn::GetAtt:
+                    - CommerceLogGroup
+                    - Arn
+              - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource:
+                  Fn::GetAtt:
+                    - CommerceCatalogTable
+                    - Arn
+              - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource:
+                  Fn::GetAtt:
+                    - CommerceOperationsTable
+                    - Arn
+              - Effect: Allow
+                Action: dynamodb:TransactWriteItems
+                Resource:
+                  - Fn::GetAtt:
+                      - CommerceCatalogTable
+                      - Arn
+                  - Fn::GetAtt:
+                      - CommerceOperationsTable
+                      - Arn
+              - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource:
+                  - Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ConfigRegistryTableName}
+                  - Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AuthSessionTableName}
+                  - Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AuthUserStateTableName}
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource:
+                  - Fn::Sub: arn:${AWS::Partition}:s3:::${ConfigPayloadsBucketName}/sites/*/versions/*/*/server/commerce.json
+                  - Fn::Sub: arn:${AWS::Partition}:s3:::${ConfigPayloadsBucketName}/sites/*/versions/*/*/server/auth-profile-registry.json
+      Tags:
+        - Key: Project
+          Value: Zoolandingpage
+        - Key: Component
+          Value: CommerceCatalogAction
+        - Key: CostCenter
+          Value: Commerce
+        - Key: ManagedBy
+          Value: SAM
+        - Key: Environment
+          Value:
+            Ref: EnvironmentName
+
+  InventoryActionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CommerceInventoryAction
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  Fn::GetAtt:
+                    - CommerceLogGroup
+                    - Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:TransactWriteItems
+                Resource:
+                  - Fn::GetAtt:
+                      - CommerceCatalogTable
+                      - Arn
+                  - Fn::GetAtt:
+                      - CommerceOperationsTable
+                      - Arn
+              - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource:
+                  - Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ConfigRegistryTableName}
+                  - Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AuthSessionTableName}
+                  - Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AuthUserStateTableName}
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource:
+                  - Fn::Sub: arn:${AWS::Partition}:s3:::${ConfigPayloadsBucketName}/sites/*/versions/*/*/server/commerce.json
+                  - Fn::Sub: arn:${AWS::Partition}:s3:::${ConfigPayloadsBucketName}/sites/*/versions/*/*/server/auth-profile-registry.json
+      Tags:
+        - Key: Project
+          Value: Zoolandingpage
+        - Key: Component
+          Value: CommerceInventoryAction
+        - Key: CostCenter
+          Value: Commerce
+        - Key: ManagedBy
+          Value: SAM
+        - Key: Environment
+          Value:
+            Ref: EnvironmentName
+
+  CheckoutRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CommerceCheckout
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  Fn::GetAtt:
+                    - CommerceLogGroup
+                    - Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:TransactWriteItems
+                Resource:
+                  - Fn::GetAtt:
+                      - CommerceCatalogTable
+                      - Arn
+                  - Fn::GetAtt:
+                      - CommerceOperationsTable
+                      - Arn
+              - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ConfigRegistryTableName}
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource:
+                  - Fn::Sub: arn:${AWS::Partition}:s3:::${ConfigPayloadsBucketName}/sites/*/versions/*/*/server/commerce.json
+                  - Fn::Sub: arn:${AWS::Partition}:s3:::${ConfigPayloadsBucketName}/sites/*/versions/*/*/server/notification-policies.json
+      Tags:
+        - Key: Project
+          Value: Zoolandingpage
+        - Key: Component
+          Value: CommerceCheckout
+        - Key: CostCenter
+          Value: Commerce
+        - Key: ManagedBy
+          Value: SAM
+        - Key: Environment
+          Value:
+            Ref: EnvironmentName
+
+  SubscriptionActionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CommerceSubscriptionAction
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  Fn::GetAtt:
+                    - CommerceLogGroup
+                    - Arn
+              - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource:
+                  - Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ConfigRegistryTableName}
+                  - Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AuthSessionTableName}
+                  - Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AuthUserStateTableName}
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource:
+                  - Fn::Sub: arn:${AWS::Partition}:s3:::${ConfigPayloadsBucketName}/sites/*/versions/*/*/server/commerce.json
+                  - Fn::Sub: arn:${AWS::Partition}:s3:::${ConfigPayloadsBucketName}/sites/*/versions/*/*/server/auth-profile-registry.json
+      Tags:
+        - Key: Project
+          Value: Zoolandingpage
+        - Key: Component
+          Value: CommerceSubscriptionAction
+        - Key: CostCenter
+          Value: Commerce
+        - Key: ManagedBy
+          Value: SAM
+        - Key: Environment
+          Value:
+            Ref: EnvironmentName
+
+  FiscalRequestRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CommerceFiscalRequest
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  Fn::GetAtt:
+                    - CommerceLogGroup
+                    - Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:TransactWriteItems
+                Resource:
+                  - Fn::GetAtt:
+                      - FiscalTable
+                      - Arn
+                  - Fn::GetAtt:
+                      - CommerceOperationsTable
+                      - Arn
+              - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ConfigRegistryTableName}
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:s3:::${ConfigPayloadsBucketName}/sites/*/versions/*/*/server/commerce.json
+      Tags:
+        - Key: Project
+          Value: Zoolandingpage
+        - Key: Component
+          Value: CommerceFiscalRequest
+        - Key: CostCenter
+          Value: Commerce
+        - Key: ManagedBy
+          Value: SAM
+        - Key: Environment
+          Value:
+            Ref: EnvironmentName
+
+  FiscalAdminRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CommerceFiscalAdmin
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  Fn::GetAtt:
+                    - CommerceLogGroup
+                    - Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:TransactWriteItems
+                Resource:
+                  Fn::GetAtt:
+                    - FiscalTable
+                    - Arn
+              - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource:
+                  - Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ConfigRegistryTableName}
+                  - Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AuthSessionTableName}
+                  - Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AuthUserStateTableName}
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource:
+                  - Fn::Sub: arn:${AWS::Partition}:s3:::${ConfigPayloadsBucketName}/sites/*/versions/*/*/server/commerce.json
+                  - Fn::Sub: arn:${AWS::Partition}:s3:::${ConfigPayloadsBucketName}/sites/*/versions/*/*/server/auth-profile-registry.json
+      Tags:
+        - Key: Project
+          Value: Zoolandingpage
+        - Key: Component
+          Value: CommerceFiscalAdmin
+        - Key: CostCenter
+          Value: Commerce
+        - Key: ManagedBy
+          Value: SAM
+        - Key: Environment
+          Value:
+            Ref: EnvironmentName
+
+  ReservationReconcilerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CommerceReservationReconciler
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  Fn::GetAtt:
+                    - CommerceLogGroup
+                    - Arn
+              - Effect: Allow
+                Action: dynamodb:Query
+                Resource:
+                  Fn::Sub:
+                    - ${CatalogArn}/index/ReservationDueIndex
+                    - CatalogArn:
+                        Fn::GetAtt:
+                          - CommerceCatalogTable
+                          - Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:TransactWriteItems
+                Resource:
+                  - Fn::GetAtt:
+                      - CommerceCatalogTable
+                      - Arn
+                  - Fn::GetAtt:
+                      - CommerceOperationsTable
+                      - Arn
+              - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ConfigRegistryTableName}
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:s3:::${ConfigPayloadsBucketName}/sites/*/versions/*/*/server/commerce.json
+      Tags:
+        - Key: Project
+          Value: Zoolandingpage
+        - Key: Component
+          Value: CommerceReservationReconciler
+        - Key: CostCenter
+          Value: Commerce
+        - Key: ManagedBy
+          Value: SAM
+        - Key: Environment
+          Value:
+            Ref: EnvironmentName
+
+  CatalogPublicReadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handlers.catalog_public_read.lambda_handler
+      Description: Serves sanitized active catalog offers.
+      Role:
+        Fn::GetAtt:
+          - CatalogPublicReadRole
+          - Arn
+      Environment:
+        Variables:
+          COMMERCE_CATALOG_TABLE_NAME:
+            Ref: CommerceCatalogTable
+          CONFIG_REGISTRY_TABLE_NAME:
+            Ref: ConfigRegistryTableName
+          CONFIG_PAYLOADS_BUCKET_NAME:
+            Ref: ConfigPayloadsBucketName
+          ENVIRONMENT_NAME:
+            Ref: EnvironmentName
+          COMMERCE_CURSOR_SIGNING_KEY:
+            Ref: CommerceCursorSigningKey
+      Events:
+        CatalogPublicRead:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: CommerceApi
+            Path: /features/commerce/public-read
+            Method: POST
+
+  CatalogReadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handlers.catalog_read.lambda_handler
+      Description: Serves authenticated catalog reads.
+      Role:
+        Fn::GetAtt:
+          - CatalogReadRole
+          - Arn
+      Environment:
+        Variables:
+          COMMERCE_CATALOG_TABLE_NAME:
+            Ref: CommerceCatalogTable
+          CONFIG_REGISTRY_TABLE_NAME:
+            Ref: ConfigRegistryTableName
+          CONFIG_PAYLOADS_BUCKET_NAME:
+            Ref: ConfigPayloadsBucketName
+          AUTH_SESSION_TABLE_NAME:
+            Ref: AuthSessionTableName
+          AUTH_USER_STATE_TABLE_NAME:
+            Ref: AuthUserStateTableName
+          ENVIRONMENT_NAME:
+            Ref: EnvironmentName
+          COMMERCE_CURSOR_SIGNING_KEY:
+            Ref: CommerceCursorSigningKey
+      Events:
+        CatalogRead:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: CommerceApi
+            Path: /features/commerce/read
+            Method: POST
+
+  CatalogActionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handlers.catalog_action.lambda_handler
+      Description: Applies authenticated catalog mutations.
+      Role:
+        Fn::GetAtt:
+          - CatalogActionRole
+          - Arn
+      Environment:
+        Variables:
+          COMMERCE_CATALOG_TABLE_NAME:
+            Ref: CommerceCatalogTable
+          COMMERCE_OPERATIONS_TABLE_NAME:
+            Ref: CommerceOperationsTable
+          CONFIG_REGISTRY_TABLE_NAME:
+            Ref: ConfigRegistryTableName
+          CONFIG_PAYLOADS_BUCKET_NAME:
+            Ref: ConfigPayloadsBucketName
+          AUTH_SESSION_TABLE_NAME:
+            Ref: AuthSessionTableName
+          AUTH_USER_STATE_TABLE_NAME:
+            Ref: AuthUserStateTableName
+          ENVIRONMENT_NAME:
+            Ref: EnvironmentName
+      Events:
+        CatalogAction:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: CommerceApi
+            Path: /features/commerce/catalog/action
+            Method: POST
+
+  InventoryActionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handlers.inventory_action.lambda_handler
+      Description: Applies authenticated inventory adjustments.
+      Role:
+        Fn::GetAtt:
+          - InventoryActionRole
+          - Arn
+      Environment:
+        Variables:
+          COMMERCE_CATALOG_TABLE_NAME:
+            Ref: CommerceCatalogTable
+          COMMERCE_OPERATIONS_TABLE_NAME:
+            Ref: CommerceOperationsTable
+          CONFIG_REGISTRY_TABLE_NAME:
+            Ref: ConfigRegistryTableName
+          CONFIG_PAYLOADS_BUCKET_NAME:
+            Ref: ConfigPayloadsBucketName
+          AUTH_SESSION_TABLE_NAME:
+            Ref: AuthSessionTableName
+          AUTH_USER_STATE_TABLE_NAME:
+            Ref: AuthUserStateTableName
+          ENVIRONMENT_NAME:
+            Ref: EnvironmentName
+      Events:
+        InventoryAction:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: CommerceApi
+            Path: /features/commerce/inventory/action
+            Method: POST
+
+  CheckoutFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handlers.checkout.lambda_handler
+      Description: Resolves authoritative offers and creates pending Checkout reservations.
+      Role:
+        Fn::GetAtt:
+          - CheckoutRole
+          - Arn
+      Environment:
+        Variables:
+          COMMERCE_CATALOG_TABLE_NAME:
+            Ref: CommerceCatalogTable
+          COMMERCE_OPERATIONS_TABLE_NAME:
+            Ref: CommerceOperationsTable
+          CONFIG_REGISTRY_TABLE_NAME:
+            Ref: ConfigRegistryTableName
+          CONFIG_PAYLOADS_BUCKET_NAME:
+            Ref: ConfigPayloadsBucketName
+          ENVIRONMENT_NAME:
+            Ref: EnvironmentName
+      Events:
+        Checkout:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: CommerceApi
+            Path: /features/commerce/public-action
+            Method: POST
+
+  SubscriptionActionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handlers.subscription_action.lambda_handler
+      Description: Validates authenticated provider-neutral subscription requests.
+      Role:
+        Fn::GetAtt:
+          - SubscriptionActionRole
+          - Arn
+      Environment:
+        Variables:
+          CONFIG_REGISTRY_TABLE_NAME:
+            Ref: ConfigRegistryTableName
+          CONFIG_PAYLOADS_BUCKET_NAME:
+            Ref: ConfigPayloadsBucketName
+          AUTH_SESSION_TABLE_NAME:
+            Ref: AuthSessionTableName
+          AUTH_USER_STATE_TABLE_NAME:
+            Ref: AuthUserStateTableName
+          ENVIRONMENT_NAME:
+            Ref: EnvironmentName
+      Events:
+        SubscriptionAction:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: CommerceApi
+            Path: /features/commerce/subscription/action
+            Method: POST
+
+  FiscalRequestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handlers.fiscal_request.lambda_handler
+      Description: Accepts an opt-in fiscal request through a short paid-order claim.
+      Role:
+        Fn::GetAtt:
+          - FiscalRequestRole
+          - Arn
+      Environment:
+        Variables:
+          FISCAL_TABLE_NAME:
+            Ref: FiscalTable
+          COMMERCE_OPERATIONS_TABLE_NAME:
+            Ref: CommerceOperationsTable
+          CONFIG_REGISTRY_TABLE_NAME:
+            Ref: ConfigRegistryTableName
+          CONFIG_PAYLOADS_BUCKET_NAME:
+            Ref: ConfigPayloadsBucketName
+          ENVIRONMENT_NAME:
+            Ref: EnvironmentName
+          FISCAL_PRODUCTION_APPROVED:
+            Ref: FiscalProductionApproved
+          FISCAL_RETENTION_APPROVAL_ID:
+            Ref: FiscalRetentionApprovalId
+          FISCAL_ACCESS_APPROVAL_ID:
+            Ref: FiscalAccessApprovalId
+      Events:
+        FiscalRequest:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: CommerceApi
+            Path: /features/commerce/fiscal/request
+            Method: POST
+
+  FiscalAdminFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handlers.fiscal_admin.lambda_handler
+      Description: Applies authenticated accountant fiscal workflow actions.
+      Role:
+        Fn::GetAtt:
+          - FiscalAdminRole
+          - Arn
+      Environment:
+        Variables:
+          FISCAL_TABLE_NAME:
+            Ref: FiscalTable
+          COMMERCE_OPERATIONS_TABLE_NAME:
+            Ref: CommerceOperationsTable
+          CONFIG_REGISTRY_TABLE_NAME:
+            Ref: ConfigRegistryTableName
+          CONFIG_PAYLOADS_BUCKET_NAME:
+            Ref: ConfigPayloadsBucketName
+          AUTH_SESSION_TABLE_NAME:
+            Ref: AuthSessionTableName
+          AUTH_USER_STATE_TABLE_NAME:
+            Ref: AuthUserStateTableName
+          ENVIRONMENT_NAME:
+            Ref: EnvironmentName
+          FISCAL_PRODUCTION_APPROVED:
+            Ref: FiscalProductionApproved
+          FISCAL_RETENTION_APPROVAL_ID:
+            Ref: FiscalRetentionApprovalId
+          FISCAL_ACCESS_APPROVAL_ID:
+            Ref: FiscalAccessApprovalId
+      Events:
+        FiscalAdmin:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: CommerceApi
+            Path: /features/commerce/fiscal/admin
+            Method: POST
+
+  IntegrationEventWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handlers.integration_event_worker.lambda_handler
+      Description: Applies normalized confirmed integration events idempotently.
+      Role:
+        Fn::GetAtt:
+          - IntegrationEventWorkerRole
+          - Arn
+      Environment:
+        Variables:
+          COMMERCE_CATALOG_TABLE_NAME:
+            Ref: CommerceCatalogTable
+          COMMERCE_OPERATIONS_TABLE_NAME:
+            Ref: CommerceOperationsTable
+          ENVIRONMENT_NAME:
+            Ref: EnvironmentName
+      Events:
+        IntegrationEvents:
+          Type: SQS
+          Properties:
+            Queue:
+              Fn::GetAtt:
+                - CommerceIntegrationEventsQueue
+                - Arn
+            BatchSize: 10
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+
+  OutboxRelayFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handlers.outbox_relay.lambda_handler
+      Description: Publishes pending notification outbox records to the fixed topic.
+      Role:
+        Fn::GetAtt:
+          - OutboxRelayRole
+          - Arn
+      Environment:
+        Variables:
+          COMMERCE_CATALOG_TABLE_NAME:
+            Ref: CommerceCatalogTable
+          COMMERCE_OPERATIONS_TABLE_NAME:
+            Ref: CommerceOperationsTable
+          NOTIFICATION_TOPIC_ARN:
+            Ref: CommerceNotificationRequestsTopic
+          ENVIRONMENT_NAME:
+            Ref: EnvironmentName
+      Events:
+        OperationsOutbox:
+          Type: DynamoDB
+          Properties:
+            Stream:
+              Fn::GetAtt:
+                - CommerceOperationsTable
+                - StreamArn
+            StartingPosition: LATEST
+            BatchSize: 10
+            BisectBatchOnFunctionError: true
+            MaximumRetryAttempts: 5
+            MaximumRecordAgeInSeconds: 3600
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+            FilterCriteria:
+              Filters:
+                - Pattern: '{"eventName":["INSERT","MODIFY"],"dynamodb":{"NewImage":{"itemType":{"S":["Outbox"]},"deliveryStatus":{"S":["pending"]}}}}'
+            DestinationConfig:
+              OnFailure:
+                Type: SQS
+                Destination:
+                  Fn::GetAtt:
+                    - CommerceOutboxFailureQueue
+                    - Arn
+
+  ReservationReconcilerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handlers.reservation_reconciler.lambda_handler
+      Description: Reconciles due reservations without releasing on uncertain evidence.
+      Role:
+        Fn::GetAtt:
+          - ReservationReconcilerRole
+          - Arn
+      Environment:
+        Variables:
+          COMMERCE_CATALOG_TABLE_NAME:
+            Ref: CommerceCatalogTable
+          COMMERCE_OPERATIONS_TABLE_NAME:
+            Ref: CommerceOperationsTable
+          CONFIG_REGISTRY_TABLE_NAME:
+            Ref: ConfigRegistryTableName
+          CONFIG_PAYLOADS_BUCKET_NAME:
+            Ref: ConfigPayloadsBucketName
+          ENVIRONMENT_NAME:
+            Ref: EnvironmentName
+          RESERVATION_DUE_INDEX_NAME: ReservationDueIndex
+      Events:
+        EveryFiveMinutes:
+          Type: Schedule
+          Properties:
+            Schedule: rate(5 minutes)
+            Enabled: false
+
+Outputs:
+  ApiUrl:
+    Description: Commerce API base URL.
+    Value:
+      Fn::Sub: https://${CommerceApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${EnvironmentName}
+  CatalogTableName:
+    Description: Commerce Catalog DynamoDB table name.
+    Value:
+      Ref: CommerceCatalogTable
+  OperationsTableName:
+    Description: Commerce Operations DynamoDB table name.
+    Value:
+      Ref: CommerceOperationsTable
+  NotificationRequestsTopicArn:
+    Description: Commerce notification request topic ARN.
+    Value:
+      Ref: CommerceNotificationRequestsTopic

@@ -108,6 +108,19 @@ class DomainTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             subscriptions.validate_recurring_sellable_type("physical")
 
+    def test_checkout_line_quantity_is_positive_and_bounded(self):
+        unit_price = offers.Money(1, "MXN", SUPPORTED_CURRENCIES)
+        boundary = orders.CheckoutLine(
+            "line-1",
+            "offer-v1",
+            orders.MAX_CHECKOUT_LINE_QUANTITY,
+            unit_price,
+        )
+        self.assertEqual(boundary.quantity, orders.MAX_CHECKOUT_LINE_QUANTITY)
+        for invalid_quantity in (0, orders.MAX_CHECKOUT_LINE_QUANTITY + 1, 10**100):
+            with self.subTest(quantity=invalid_quantity), self.assertRaises(ValueError):
+                orders.CheckoutLine("line-1", "offer-v1", invalid_quantity, unit_price)
+
     def test_catalog_items_keep_variants_and_data_space_references_deeply_immutable(self):
         reference = catalog.DataSpaceRecordReference(
             space_id="products",

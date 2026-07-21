@@ -46,8 +46,8 @@ jobs:
           python-version: '3.13'
       - name: Install pinned runtime and test tooling
         run: |
-          python -m pip install --disable-pip-version-check -r requirements.txt PyYAML==6.0.2 pip-audit==2.10.1
-          python -m pip_audit -r requirements.txt
+          python -m pip install --disable-pip-version-check -r requirements.txt PyYAML==6.0.2 pip-audit==2.10.1 aws-sam-translator==1.111.0
+          python -m pip_audit -r src/requirements.txt
       - name: Run unit tests
         run: python -m unittest discover -s tests -p "test_*.py"
       - uses: aws-actions/setup-sam@89ddb14d60e682855e3fea4be85b3c56485de310 # v3
@@ -59,3 +59,4 @@ jobs:
         run: |
           sam validate --lint
           sam build --no-cached
+          python tests/verify_sam_build.py

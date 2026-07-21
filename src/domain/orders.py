@@ -8,6 +8,7 @@ from .offers import Money
 
 
 MAX_CHECKOUT_LINES = 20
+MAX_CHECKOUT_LINE_QUANTITY = 1_000_000
 _SAFE_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}", re.ASCII)
 
 
@@ -27,6 +28,13 @@ def line_total(unit_price: Money, quantity: object) -> Money:
     )
 
 
+def _checkout_quantity(value: object) -> int:
+    quantity = _positive_quantity(value)
+    if quantity > MAX_CHECKOUT_LINE_QUANTITY:
+        raise ValueError("checkout line quantity exceeds the platform maximum")
+    return quantity
+
+
 @dataclass(frozen=True, slots=True)
 class CheckoutLine:
     """Server-resolved line snapshot; browser prices are never authoritative."""
@@ -40,7 +48,7 @@ class CheckoutLine:
     def __post_init__(self) -> None:
         _safe_id(self.line_id, "line_id")
         _safe_id(self.offer_version_id, "offer_version_id")
-        _positive_quantity(self.quantity)
+        _checkout_quantity(self.quantity)
         if type(self.unit_price) is not Money:
             raise ValueError("unit_price must be immutable Money")
         if self.stock_id is not None:

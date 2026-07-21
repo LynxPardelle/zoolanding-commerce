@@ -7,6 +7,7 @@ from src.storage import (
     ConditionalWriteFailed,
     CommerceScope,
     CommerceStore,
+    InvalidDueMarker,
     StorageConflict,
     StorageLimitExceeded,
     StorageOutcomeUnknown,
@@ -39,15 +40,23 @@ class FakeBackend:
             raise error
         return copy.deepcopy(self.items.get((table_name, pk, sk)))
 
-    def query_due(self, table_name, pk, through_epoch, limit):
-        self.queries.append((table_name, pk, through_epoch, limit))
-        prefix = "RESERVATION_DUE#"
-        maximum = f"{prefix}{through_epoch:020d}#\uffff"
-        return [
-            copy.deepcopy(item)
-            for (table, item_pk, sk), item in sorted(self.items.items())
-            if table == table_name and item_pk == pk and prefix <= sk <= maximum
-        ][:limit]
+    def query_due(self, table_name, due_partition, through_epoch, limit, cursor=None):
+        self.queries.append((table_name, due_partition, through_epoch, limit, cursor))
+        maximum = f"{through_epoch:020d}#\uffff"
+        rows = [
+            {
+                key: copy.deepcopy(item[key])
+                for key in ("pk", "sk", "duePartition", "dueKey")
+            }
+            for (table, _item_pk, _sk), item in sorted(self.items.items())
+            if table == table_name
+            and item.get("duePartition") == due_partition
+            and item.get("dueKey", "") <= maximum
+            and (cursor is None or item.get("dueKey", "") > cursor)
+        ]
+        page = rows[:limit]
+        next_cursor = page[-1]["dueKey"] if len(rows) > limit else None
+        return page, next_cursor
 
     def transact(self, operations, client_token):
         if self.before_transact:
@@ -80,6 +89,8 @@ class FakeBackend:
                 or any(current.get(field) != expected for field, expected in condition.items())
             ):
                 raise ConditionalWriteFailed()
+            if operation["kind"] == "check":
+                continue
             if operation["kind"] == "put":
                 candidate[key] = copy.deepcopy(operation["item"])
             elif operation["kind"] == "delete":
@@ -97,7 +108,7 @@ class CommerceStorageTests(unittest.TestCase):
     def setUp(self):
         self.backend = FakeBackend()
         self.store = CommerceStore(self.backend, CATALOG_TABLE, OPERATIONS_TABLE)
-        self.scope = CommerceScope("test", "tenant-a", "draft-a")
+        self.scope = CommerceScope("test", "tenant-a", "draft-a", "draft-a.example.test")
 
     def seed_stock(self, stock_id, *, on_hand=10, reserved=0, revision=1, scope=None):
         scope = scope or self.scope
@@ -108,6 +119,7 @@ class CommerceStorageTests(unittest.TestCase):
             "environment": scope.environment,
             "tenantId": scope.tenant_id,
             "draftId": scope.draft_id,
+            "domain": scope.domain,
             "stockId": stock_id,
             "locationId": "primary",
             "tracked": True,
@@ -151,6 +163,11 @@ class CommerceStorageTests(unittest.TestCase):
             created_at_epoch=NOW,
             **values,
         )
+
+    def test_scope_requires_a_canonical_domain(self):
+        for value in ("", "HTTPS://EXAMPLE.COM", "bad domain", "localhost"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                CommerceScope("test", "tenant-a", "draft-a", value)
 
     def test_adjust_is_one_atomic_conditional_movement_with_durable_receipt(self):
         self.seed_stock("landing", on_hand=10, reserved=2, revision=4)
@@ -223,6 +240,33 @@ class CommerceStorageTests(unittest.TestCase):
                 **self.metadata("initialize-again"),
             )
 
+    def test_transport_request_identifiers_persist_without_resource_id_restrictions(self):
+        identifiers = ("AbCDef123", "req:abc", "R" * 128)
+
+        for index, identifier in enumerate(identifiers):
+            with self.subTest(identifier=identifier):
+                self.store.adjust_stock(
+                    self.scope,
+                    f"transport-{index}",
+                    1,
+                    0,
+                    location_id="primary",
+                    idempotency_key=f"transport-{index}",
+                    request_id=identifier,
+                    correlation_id=identifier,
+                    actor_hash=None,
+                    now_epoch=NOW,
+                )
+                movement = next(
+                    item
+                    for (table, _pk, _sk), item in self.backend.items.items()
+                    if table == CATALOG_TABLE
+                    and item.get("itemType") == "StockMovement"
+                    and item.get("stockId") == f"transport-{index}"
+                )
+                self.assertEqual(movement["requestId"], identifier)
+                self.assertEqual(movement["correlationId"], identifier)
+
     def test_reserve_creates_order_reservation_due_marker_and_stock_atomically(self):
         self.seed_stock("landing", on_hand=5)
         order = PendingOrder(
@@ -234,7 +278,15 @@ class CommerceStorageTests(unittest.TestCase):
             ),
         )
 
-        result = self.reserve(order)
+        result = self.reserve(
+            order,
+            notification_target={
+                "publishedVersionId": "version-1",
+                "recipientSetId": "billing-operators",
+                "recipientSetVersion": 1,
+                "recipientMemberId": "primary",
+            },
+        )
 
         self.assertEqual(result["checkoutExpiresAt"], NOW + 2_100)
         self.assertEqual(result["reconcileAfter"], NOW + 2_400)
@@ -249,16 +301,40 @@ class CommerceStorageTests(unittest.TestCase):
         self.assertIn("ReservationDue", item_types)
         order_item = next(operation["item"] for operation in operations if operation.get("item", {}).get("itemType") == "Order")
         self.assertEqual(order_item["paymentAttemptId"], "attempt-1")
+        self.assertEqual(order_item["notificationTarget"]["publishedVersionId"], "version-1")
         self.assertNotIn("expiresAt", order_item)
         self.assertNotIn("provider", repr(operations).lower())
         stock = self.backend.get(CATALOG_TABLE, self.scope.partition_key, "STOCK#primary#landing")
         self.assertEqual((stock["onHand"], stock["reserved"], stock["available"]), (5, 2, 3))
 
-        due = self.store.list_due_reservations(self.scope, NOW + 2_399)
+        due = self.store.list_due_reservations("test", NOW + 2_399)
         self.assertEqual(due, [])
-        due = self.store.list_due_reservations(self.scope, NOW + 2_400)
-        self.assertEqual(due, ["reservation-1"])
-        self.assertEqual(self.backend.queries[-1][0:2], (CATALOG_TABLE, self.scope.partition_key))
+        due = self.store.list_due_reservations("test", NOW + 2_400)
+        self.assertEqual([item.reservation_id for item in due], ["reservation-1"])
+        self.assertEqual(due[0].scope, self.scope)
+        self.assertEqual(due[0].order_id, "order-1")
+        self.assertEqual(due[0].payment_attempt_id, "attempt-1")
+        self.assertEqual(self.backend.queries[-1][0:2], (CATALOG_TABLE, "ENV#test"))
+
+    def test_reserve_rejects_untrusted_notification_target_fields_before_writing(self):
+        target = {
+            "publishedVersionId": "version-1",
+            "recipientSetId": "billing-operators",
+            "recipientSetVersion": 1,
+            "recipientMemberId": "primary",
+        }
+        invalid_targets = (
+            {**target, "email": "attacker@example.test"},
+            {**target, "recipientSetVersion": 0},
+            {**target, "recipientSetVersion": True},
+        )
+
+        for notification_target in invalid_targets:
+            with self.subTest(notification_target=notification_target), self.assertRaises(ValueError):
+                self.reserve(notification_target=notification_target)
+
+        self.assertEqual(self.backend.transactions, [])
+        self.assertEqual(self.backend.items, {})
 
     def test_due_reservation_can_be_deferred_without_starving_the_next_item(self):
         self.seed_stock("first", on_hand=2)
@@ -278,7 +354,10 @@ class CommerceStorageTests(unittest.TestCase):
             )
         due_at = NOW + 2_400
 
-        self.assertEqual(self.store.list_due_reservations(self.scope, due_at, limit=1), ["reservation-1"])
+        self.assertEqual(
+            [item.reservation_id for item in self.store.list_due_reservations("test", due_at, limit=1)],
+            ["reservation-1"],
+        )
         defer_metadata = self.metadata("defer-1")
         defer_metadata["now_epoch"] = due_at
         self.store.defer_reservation(
@@ -288,11 +367,96 @@ class CommerceStorageTests(unittest.TestCase):
             **defer_metadata,
         )
 
-        self.assertEqual(self.store.list_due_reservations(self.scope, due_at, limit=1), ["reservation-2"])
         self.assertEqual(
-            self.store.list_due_reservations(self.scope, due_at + 300),
+            [item.reservation_id for item in self.store.list_due_reservations("test", due_at, limit=1)],
+            ["reservation-2"],
+        )
+        self.assertEqual(
+            [item.reservation_id for item in self.store.list_due_reservations("test", due_at + 300)],
             ["reservation-2", "reservation-1"],
         )
+
+    def test_due_reservations_can_read_a_bounded_second_gsi_page(self):
+        self.seed_stock("first", on_hand=2)
+        self.seed_stock("second", on_hand=2)
+        for index, stock_id in enumerate(("first", "second"), start=1):
+            self.store.reserve_checkout(
+                self.scope,
+                self.order(
+                    order_id=f"page-order-{index}",
+                    attempt_id=f"page-attempt-{index}",
+                    stock_ids=(stock_id,),
+                ),
+                f"page-reservation-{index}",
+                location_id="primary",
+                created_at_epoch=NOW,
+                **self.metadata(f"page-reserve-{index}"),
+            )
+
+        due = self.store.list_due_reservations(
+            "test",
+            NOW + 2_400,
+            limit=1,
+            max_pages=2,
+        )
+
+        self.assertEqual(
+            [item.reservation_id for item in due],
+            ["page-reservation-1", "page-reservation-2"],
+        )
+        self.assertEqual(len(self.backend.queries), 2)
+
+    def test_due_gsi_results_are_environment_scoped_and_strongly_rechecked(self):
+        self.seed_stock("landing", on_hand=2)
+        self.reserve()
+        due_at = NOW + 2_400
+        marker_key = (
+            CATALOG_TABLE,
+            self.scope.partition_key,
+            f"RESERVATION_DUE#{due_at:020d}#reservation-1",
+        )
+        stale = copy.deepcopy(self.backend.items[marker_key])
+        del self.backend.items[marker_key]
+        self.backend.query_due = lambda *_args: ([stale], None)
+
+        self.assertEqual(self.store.list_due_reservations("test", due_at), [])
+        self.assertEqual(self.store.list_due_reservations("production", due_at), [])
+
+    def test_corrupt_due_gsi_item_is_returned_as_an_isolated_marker(self):
+        self.seed_stock("landing", on_hand=2)
+        self.reserve()
+        due_at = NOW + 2_400
+        marker = next(
+            item for (_table, _pk, _sk), item in self.backend.items.items()
+            if item.get("itemType") == "ReservationDue"
+        )
+        marker["reconcileAfter"] = "not-an-epoch"
+        self.backend.query_due = lambda *_args: ([copy.deepcopy(marker)], None)
+
+        due = self.store.list_due_reservations("test", due_at)
+
+        self.assertEqual(len(due), 1)
+        self.assertIs(type(due[0]), InvalidDueMarker)
+        self.assertEqual(due[0].partition_key, self.scope.partition_key)
+
+    def test_due_marker_primary_sort_key_must_match_its_business_identity(self):
+        self.seed_stock("landing", on_hand=2)
+        self.reserve()
+        due_at = NOW + 2_400
+        marker = next(
+            item for (_table, _pk, _sk), item in self.backend.items.items()
+            if item.get("itemType") == "ReservationDue"
+        )
+        old_key = (CATALOG_TABLE, self.scope.partition_key, marker["sk"])
+        forged = copy.deepcopy(marker)
+        forged["sk"] = f"RESERVATION_DUE#{due_at:020d}#alternate"
+        del self.backend.items[old_key]
+        self.backend.items[(CATALOG_TABLE, self.scope.partition_key, forged["sk"])] = forged
+
+        due = self.store.list_due_reservations("test", due_at)
+
+        self.assertEqual(len(due), 1)
+        self.assertIs(type(due[0]), InvalidDueMarker)
 
     def test_reserve_aggregates_shared_stock_and_checks_limits_before_writing(self):
         self.seed_stock("landing", on_hand=10)
@@ -326,7 +490,7 @@ class CommerceStorageTests(unittest.TestCase):
             ])
 
     def test_twenty_tracked_lines_use_one_bounded_45_action_transaction(self):
-        scope = CommerceScope("test", "tenant-a", "draft-max")
+        scope = CommerceScope("test", "tenant-a", "draft-max", "draft-max.example.test")
         stock_ids = tuple(f"stock-{index}" for index in range(20))
         for stock_id in stock_ids:
             self.seed_stock(stock_id, on_hand=1, scope=scope)
@@ -401,7 +565,7 @@ class CommerceStorageTests(unittest.TestCase):
         with self.assertRaises(StorageConflict):
             self.reserve(changed)
 
-        other = CommerceScope("test", "tenant-a", "draft-b")
+        other = CommerceScope("test", "tenant-a", "draft-b", "draft-b.example.test")
         self.seed_stock("landing", on_hand=10, scope=other)
         self.store.reserve_checkout(
             other,
@@ -567,7 +731,7 @@ class CommerceStorageTests(unittest.TestCase):
                 **self.metadata("release-after-commit"),
             )
 
-        scope = CommerceScope("test", "tenant-a", "draft-release")
+        scope = CommerceScope("test", "tenant-a", "draft-release", "draft-release.example.test")
         self.seed_stock("landing", on_hand=10, scope=scope)
         self.store.reserve_checkout(
             scope,
@@ -703,20 +867,25 @@ class CommerceStorageTests(unittest.TestCase):
                             "reservationId": {"S": "reservation"},
                             "reconcileAfter": {"N": "10"},
                         }
-                    ]
+                    ],
+                    "LastEvaluatedKey": {"pk": {"S": "next-scope"}, "sk": {"S": "next-marker"}},
                 }
 
         client = Client()
-        items = _DynamoBackend(client).query_due(CATALOG_TABLE, "scope", 10, 25)
+        start = {"pk": {"S": "start-scope"}, "sk": {"S": "start-marker"}}
+        items, cursor = _DynamoBackend(client).query_due(CATALOG_TABLE, "ENV#test", 10, 25, start)
 
         self.assertEqual(items[0]["reservationId"], "reservation")
+        self.assertEqual(cursor, {"pk": {"S": "next-scope"}, "sk": {"S": "next-marker"}})
         self.assertEqual(client.request["TableName"], CATALOG_TABLE)
+        self.assertEqual(client.request["IndexName"], "ReservationDueIndex")
         self.assertEqual(client.request["Limit"], 25)
-        self.assertTrue(client.request["ConsistentRead"])
-        self.assertEqual(client.request["ExpressionAttributeValues"][":pk"], {"S": "scope"})
+        self.assertFalse(client.request["ConsistentRead"])
+        self.assertEqual(client.request["ExclusiveStartKey"], start)
+        self.assertEqual(client.request["ExpressionAttributeValues"][":pk"], {"S": "ENV#test"})
         self.assertEqual(
             client.request["ExpressionAttributeValues"][":end"],
-            {"S": "RESERVATION_DUE#00000000000000000010#\uffff"},
+            {"S": "00000000000000000010#\uffff"},
         )
 
 

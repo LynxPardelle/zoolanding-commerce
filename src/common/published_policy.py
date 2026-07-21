@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -17,6 +17,7 @@ COMMERCE_CAPABILITIES = {
     "commerce:catalog:write",
     "commerce:inventory:write",
     "commerce:subscription:manage",
+    "commerce:fiscal:manage",
 }
 SELLABLE_TYPES = {"physical", "service", "subscription", "add_on"}
 SHIPPING_METHODS = {"fixed", "free", "pickup"}
@@ -26,6 +27,7 @@ DOMAIN_RE = re.compile(
 )
 SAFE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 VERSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+CURRENCY_RE = re.compile(r"^[A-Z]{3}$", re.ASCII)
 
 
 class PolicyResolutionError(Exception):
@@ -42,6 +44,7 @@ class ResolvedPolicies:
     prefix: str
     commerce: dict[str, Any]
     auth_registry: dict[str, Any]
+    notification_policies: dict[str, Any] = field(default_factory=dict)
 
     @property
     def scope(self) -> dict[str, str]:
@@ -66,7 +69,7 @@ class PublishedPolicyResolver:
         self._registry_table = registry_table
         self._s3 = s3_client
         self._bucket_name = bucket_name
-        self._cache: dict[tuple[str, str, str, str, str, bool], ResolvedPolicies] = {}
+        self._cache: dict[tuple[str, str, str, str, str, bool, bool], ResolvedPolicies] = {}
 
     def resolve(
         self,
@@ -84,6 +87,7 @@ class PublishedPolicyResolver:
             tenant_id=tenant_id,
             draft_id=draft_id,
             include_auth=True,
+            include_notifications=False,
         )
 
     def resolve_commerce(
@@ -102,6 +106,26 @@ class PublishedPolicyResolver:
             tenant_id=tenant_id,
             draft_id=draft_id,
             include_auth=False,
+            include_notifications=False,
+        )
+
+    def resolve_checkout(
+        self,
+        *,
+        environment: str,
+        domain: str,
+        tenant_id: str | None = None,
+        draft_id: str | None = None,
+    ) -> ResolvedPolicies:
+        """Resolve Commerce plus its optional same-version notification policy."""
+
+        return self._resolve(
+            environment=environment,
+            domain=domain,
+            tenant_id=tenant_id,
+            draft_id=draft_id,
+            include_auth=False,
+            include_notifications=True,
         )
 
     def _resolve(
@@ -112,6 +136,7 @@ class PublishedPolicyResolver:
         tenant_id: str | None,
         draft_id: str | None,
         include_auth: bool,
+        include_notifications: bool,
     ) -> ResolvedPolicies:
         environment = _environment(environment)
         domain = _domain(domain)
@@ -144,6 +169,7 @@ class PublishedPolicyResolver:
             domain,
             version_id,
             include_auth,
+            include_notifications,
         )
         cached = self._cache.get(cache_key)
         if cached is not None:
@@ -159,6 +185,20 @@ class PublishedPolicyResolver:
         )
         if include_auth:
             _validate_auth_registry(auth_registry)
+        notification_policy_ids = commerce["commerce"].get("notificationPolicyIds", [])
+        notification_policies: dict[str, Any] = {}
+        if include_notifications and notification_policy_ids:
+            if len(notification_policy_ids) != 1:
+                raise PolicyResolutionError("Published notification policy is ambiguous")
+            notification_policies = self._load_json(f"{base_key}/notification-policies.json")
+            _validate_notification_policies(
+                notification_policies,
+                environment,
+                resolved_tenant,
+                resolved_draft,
+                domain,
+                notification_policy_ids[0],
+            )
 
         resolved = ResolvedPolicies(
             environment=environment,
@@ -169,6 +209,7 @@ class PublishedPolicyResolver:
             prefix=expected_prefix,
             commerce=commerce,
             auth_registry=auth_registry,
+            notification_policies=notification_policies,
         )
         self._cache[cache_key] = resolved
         return resolved
@@ -287,13 +328,18 @@ def _validate_commerce(
     _validate_fiscal(commerce.get("fiscal"), environment)
     _validate_checkout(commerce.get("checkout"))
     if "notificationPolicyIds" in commerce:
-        _safe_id_list(commerce.get("notificationPolicyIds"), maximum=16, allow_empty=True)
+        _safe_id_list(commerce.get("notificationPolicyIds"), maximum=1, allow_empty=True)
 
     if "subscription" in sellable_types and not payments["subscriptions"]:
         raise PolicyResolutionError("Published Commerce policy is invalid")
     if "physical" in sellable_types and (not inventory["enabled"] or not shipping["enabled"]):
         raise PolicyResolutionError("Published Commerce policy is invalid")
     if inventory["tracked"] and not inventory["enabled"]:
+        raise PolicyResolutionError("Published Commerce policy is invalid")
+    if commerce["fiscal"]["enabled"] and (
+        commerce["adminAccess"].get("mode") != "auth-profile"
+        or "commerce:fiscal:manage" not in commerce["adminAccess"].get("capabilities", [])
+    ):
         raise PolicyResolutionError("Published Commerce policy is invalid")
 
 
@@ -313,6 +359,7 @@ def _validate_admin_access(value: Any) -> None:
 def _validate_payments(value: Any) -> dict[str, Any]:
     keys = {
         "bindingId",
+        "supportedCurrencies",
         "oneTime",
         "subscriptions",
         "editablePrices",
@@ -323,7 +370,18 @@ def _validate_payments(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != keys:
         raise PolicyResolutionError("Published Commerce policy is invalid")
     _safe_id(value.get("bindingId"))
-    if any(type(value.get(key)) is not bool for key in keys - {"bindingId", "proration"}):
+    currencies = value.get("supportedCurrencies")
+    if (
+        not isinstance(currencies, list)
+        or not 1 <= len(currencies) <= 16
+        or any(type(currency) is not str or CURRENCY_RE.fullmatch(currency) is None for currency in currencies)
+        or len(set(currencies)) != len(currencies)
+    ):
+        raise PolicyResolutionError("Published Commerce policy is invalid")
+    if any(
+        type(value.get(key)) is not bool
+        for key in keys - {"bindingId", "supportedCurrencies", "proration"}
+    ):
         raise PolicyResolutionError("Published Commerce policy is invalid")
     if value.get("proration") not in {"disabled", "operator-selectable"}:
         raise PolicyResolutionError("Published Commerce policy is invalid")
@@ -417,6 +475,111 @@ def _validate_auth_registry(registry: dict[str, Any]) -> None:
         raise PolicyResolutionError("Published auth policy is invalid")
 
 
+def _validate_notification_policies(
+    descriptor: dict[str, Any],
+    environment: str,
+    tenant_id: str,
+    draft_id: str,
+    domain: str,
+    referenced_policy_id: str,
+) -> None:
+    expected_scope = {
+        "environment": environment,
+        "tenantId": tenant_id,
+        "draftId": draft_id,
+        "domain": domain,
+    }
+    policies = descriptor.get("policies")
+    if (
+        set(descriptor) != {"version", "scope", "policies"}
+        or descriptor.get("version") != 1
+        or descriptor.get("scope") != expected_scope
+        or not isinstance(policies, list)
+        or len(policies) > 32
+    ):
+        raise PolicyResolutionError("Published notification policy is invalid")
+
+    seen: set[str] = set()
+    referenced = []
+    for policy in policies:
+        required = {
+            "id", "status", "provider", "connectionId", "notificationTypes",
+            "templateIds", "recipientSets", "retryPolicy", "acceptanceStatus",
+        }
+        if not isinstance(policy, dict) or set(policy) not in (required, required | {"transportApprovalId"}):
+            raise PolicyResolutionError("Published notification policy is invalid")
+        policy_id = _safe_id(policy.get("id"))
+        if policy_id in seen:
+            raise PolicyResolutionError("Published notification policy is invalid")
+        seen.add(policy_id)
+        if policy.get("status") not in {"disabled", "active"}:
+            raise PolicyResolutionError("Published notification policy is invalid")
+        if policy.get("provider") != "email.smtp":
+            raise PolicyResolutionError("Published notification policy is invalid")
+        _safe_id(policy.get("connectionId"))
+        types = _notification_list(
+            policy.get("notificationTypes"),
+            {"payment-succeeded", "payment-failed"},
+            32,
+        )
+        templates = _notification_list(
+            policy.get("templateIds"),
+            {"payment-succeeded-v1", "payment-failed-v1"},
+            32,
+        )
+        if {f"{value}-v1" for value in types} != templates:
+            raise PolicyResolutionError("Published notification policy is invalid")
+        recipient_sets = policy.get("recipientSets")
+        if not isinstance(recipient_sets, list) or not 1 <= len(recipient_sets) <= 16:
+            raise PolicyResolutionError("Published notification policy is invalid")
+        recipient_ids: set[str] = set()
+        for recipient_set in recipient_sets:
+            if not isinstance(recipient_set, dict) or set(recipient_set) != {"id", "version", "members"}:
+                raise PolicyResolutionError("Published notification policy is invalid")
+            recipient_id = _safe_id(recipient_set.get("id"))
+            if recipient_id in recipient_ids:
+                raise PolicyResolutionError("Published notification policy is invalid")
+            recipient_ids.add(recipient_id)
+            if not _bounded_integer(recipient_set.get("version"), 1, 2_147_483_647):
+                raise PolicyResolutionError("Published notification policy is invalid")
+            members = recipient_set.get("members")
+            if (
+                not isinstance(members, list)
+                or len(members) != 1
+                or not isinstance(members[0], dict)
+                or set(members[0]) != {"id"}
+            ):
+                raise PolicyResolutionError("Published notification policy is invalid")
+            _safe_id(members[0].get("id"))
+        retry = policy.get("retryPolicy")
+        if (
+            not isinstance(retry, dict)
+            or set(retry) != {"maxAttempts"}
+            or not _bounded_integer(retry.get("maxAttempts"), 1, 5)
+            or policy.get("acceptanceStatus") != "accepted_by_smtp"
+        ):
+            raise PolicyResolutionError("Published notification policy is invalid")
+        if "transportApprovalId" in policy:
+            _safe_id(policy.get("transportApprovalId"))
+        if environment == "production" and policy.get("status") == "active" and "transportApprovalId" not in policy:
+            raise PolicyResolutionError("Published notification policy is invalid")
+        if policy_id == referenced_policy_id:
+            referenced.append(policy)
+    if len(referenced) != 1:
+        raise PolicyResolutionError("Published notification policy reference is invalid")
+
+
+def _notification_list(value: Any, allowed: set[str], maximum: int) -> set[str]:
+    if (
+        not isinstance(value, list)
+        or not 1 <= len(value) <= maximum
+        or any(not isinstance(item, str) or item not in allowed for item in value)
+        or len(set(value)) != len(value)
+    ):
+        raise PolicyResolutionError("Published notification policy is invalid")
+    return set(value)
+
+
 def _bounded_integer(value: Any, lower: int, upper: int) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and lower <= value <= upper
 
@@ -486,6 +649,22 @@ def resolve_commerce_policy(
 ) -> ResolvedPolicies:
     resolver = _resolver_from_environment()
     return resolver.resolve_commerce(
+        environment=environment or os.getenv("ENVIRONMENT_NAME", ""),
+        domain=domain,
+        tenant_id=tenant_id,
+        draft_id=draft_id,
+    )
+
+
+def resolve_checkout_policy(
+    domain: str,
+    environment: str | None = None,
+    *,
+    tenant_id: str | None = None,
+    draft_id: str | None = None,
+) -> ResolvedPolicies:
+    resolver = _resolver_from_environment()
+    return resolver.resolve_checkout(
         environment=environment or os.getenv("ENVIRONMENT_NAME", ""),
         domain=domain,
         tenant_id=tenant_id,

@@ -32,6 +32,7 @@ def commerce_policy(environment="test"):
             "sellableTypes": ["physical", "service", "subscription", "add_on"],
             "payments": {
                 "bindingId": "stripe-main",
+                "supportedCurrencies": ["MXN"],
                 "oneTime": True,
                 "subscriptions": True,
                 "editablePrices": True,
@@ -62,6 +63,33 @@ def commerce_policy(environment="test"):
 
 def auth_registry():
     return {"version": 1, "profiles": [{"authProfileId": "staff"}]}
+
+
+def notification_policy(environment="test"):
+    return {
+        "version": 1,
+        "scope": {
+            "environment": environment,
+            "tenantId": TENANT_ID,
+            "draftId": DRAFT_ID,
+            "domain": DOMAIN,
+        },
+        "policies": [{
+            "id": "payment-status",
+            "status": "active",
+            "provider": "email.smtp",
+            "connectionId": "billing-mailbox",
+            "notificationTypes": ["payment-succeeded", "payment-failed"],
+            "templateIds": ["payment-succeeded-v1", "payment-failed-v1"],
+            "recipientSets": [{
+                "id": "billing-operators",
+                "version": 1,
+                "members": [{"id": "primary"}],
+            }],
+            "retryPolicy": {"maxAttempts": 5},
+            "acceptanceStatus": "accepted_by_smtp",
+        }],
+    }
 
 
 class FakeRegistryTable:
@@ -105,10 +133,12 @@ class PublishedPolicyResolverTests(unittest.TestCase):
         }
         self.commerce_key = f"{self.prefix}{DOMAIN}/server/commerce.json"
         self.auth_key = f"{self.prefix}{DOMAIN}/server/auth-profile-registry.json"
+        self.notification_key = f"{self.prefix}{DOMAIN}/server/notification-policies.json"
         self.table = FakeRegistryTable(self.metadata)
         self.s3 = FakeS3({
             self.commerce_key: commerce_policy(),
             self.auth_key: auth_registry(),
+            self.notification_key: notification_policy(),
         })
         self.resolver = PublishedPolicyResolver(self.table, self.s3, "config-bucket")
 
@@ -131,6 +161,50 @@ class PublishedPolicyResolverTests(unittest.TestCase):
         self.assertEqual(resolved.auth_registry["profiles"][0]["authProfileId"], "staff")
         self.assertEqual([call["Key"] for call in self.s3.calls], [self.commerce_key, self.auth_key])
 
+    def test_accepts_code_owned_fiscal_admin_capability(self):
+        self.s3.objects[self.commerce_key]["commerce"]["adminAccess"]["capabilities"].append(
+            "commerce:fiscal:manage"
+        )
+
+        resolved = self.resolver.resolve(environment="test", domain=DOMAIN)
+
+        self.assertIn(
+            "commerce:fiscal:manage",
+            resolved.commerce["commerce"]["adminAccess"]["capabilities"],
+        )
+
+    def test_fiscal_enabled_requires_auth_profile_with_fiscal_admin_capability(self):
+        from src.common.published_policy import PolicyResolutionError
+
+        enabled = {
+            "enabled": True,
+            "manual": True,
+            "disclosureId": "manual-invoice-v1",
+            "taxBehavior": "exclusive",
+            "retentionDays": 90,
+            "requestWindowHours": 24,
+        }
+        self.s3.objects[self.commerce_key]["commerce"]["fiscal"] = enabled
+        self.s3.objects[self.commerce_key]["commerce"]["adminAccess"] = {"mode": "none"}
+        with self.assertRaises(PolicyResolutionError):
+            self.resolve()
+
+        self.setUp()
+        self.s3.objects[self.commerce_key]["commerce"]["fiscal"] = enabled
+        with self.assertRaises(PolicyResolutionError):
+            self.resolve()
+
+        self.setUp()
+        self.s3.objects[self.commerce_key]["commerce"]["fiscal"] = enabled
+        self.s3.objects[self.commerce_key]["commerce"]["adminAccess"]["capabilities"].append(
+            "commerce:fiscal:manage"
+        )
+        self.resolve()
+
+        self.setUp()
+        self.s3.objects[self.commerce_key]["commerce"]["adminAccess"] = {"mode": "none"}
+        self.resolve()
+
     def test_reads_pointer_fresh_and_caches_only_immutable_descriptors(self):
         first = self.resolve()
         self.s3.objects[self.commerce_key] = {"invalid": True}
@@ -150,6 +224,33 @@ class PublishedPolicyResolverTests(unittest.TestCase):
 
         self.assertEqual(resolved.auth_registry, {})
         self.assertEqual([call["Key"] for call in self.s3.calls], [self.commerce_key])
+
+    def test_checkout_resolution_pins_exact_notification_policy_version(self):
+        resolved = self.resolver.resolve_checkout(environment="test", domain=DOMAIN)
+
+        self.assertEqual(resolved.notification_policies, notification_policy())
+        self.assertEqual(
+            [call["Key"] for call in self.s3.calls],
+            [self.commerce_key, self.notification_key],
+        )
+
+    def test_checkout_resolution_rejects_notification_scope_mismatch(self):
+        from src.common.published_policy import PolicyResolutionError
+
+        self.s3.objects[self.notification_key]["scope"]["draftId"] = "other-draft"
+
+        with self.assertRaises(PolicyResolutionError):
+            self.resolver.resolve_checkout(environment="test", domain=DOMAIN)
+
+    def test_production_checkout_rejects_active_unapproved_notification_transport(self):
+        from src.common.published_policy import PolicyResolutionError
+
+        self.metadata["published"] = {"versionId": "v1", "prefix": self.prefix}
+        self.s3.objects[self.commerce_key] = commerce_policy("production")
+        self.s3.objects[self.notification_key] = notification_policy("production")
+
+        with self.assertRaises(PolicyResolutionError):
+            self.resolver.resolve_checkout(environment="production", domain=DOMAIN)
 
     def test_public_and_protected_caches_are_separate(self):
         public = self.resolver.resolve_commerce(
@@ -268,6 +369,10 @@ class PublishedPolicyResolverTests(unittest.TestCase):
         cases = (
             (("commerce", "sellableTypes"), ["subscription", "subscription"]),
             (("commerce", "payments", "subscriptions"), False),
+            (("commerce", "payments", "supportedCurrencies"), []),
+            (("commerce", "payments", "supportedCurrencies"), ["MXN", "MXN"]),
+            (("commerce", "payments", "supportedCurrencies"), ["mxn"]),
+            (("commerce", "payments", "supportedCurrencies"), [f"AA{chr(65 + index)}" for index in range(17)]),
             (("commerce", "inventory", "backorders"), True),
             (("commerce", "shipping", "methods"), ["carrier-api"]),
             (("commerce", "checkout", "successPath"), "https://example.com/success"),
@@ -279,6 +384,21 @@ class PublishedPolicyResolverTests(unittest.TestCase):
                 self.s3.objects[self.commerce_key] = mutate(path, value)
                 with self.assertRaises(PolicyResolutionError):
                     self.resolve()
+
+    def test_requires_currency_policy_and_allows_at_most_one_notification_policy(self):
+        from src.common.published_policy import PolicyResolutionError
+
+        del self.s3.objects[self.commerce_key]["commerce"]["payments"]["supportedCurrencies"]
+        with self.assertRaises(PolicyResolutionError):
+            self.resolve()
+
+        self.setUp()
+        self.s3.objects[self.commerce_key]["commerce"]["notificationPolicyIds"] = [
+            "payment-status",
+            "backup-status",
+        ]
+        with self.assertRaises(PolicyResolutionError):
+            self.resolve()
 
 
 if __name__ == "__main__":
