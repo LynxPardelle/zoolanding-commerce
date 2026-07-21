@@ -33,6 +33,7 @@ _API_ID_RE = re.compile(r"^[a-z0-9]{10}$", re.ASCII)
 _REGION_RE = re.compile(r"^[a-z]{2}(?:-gov)?-[a-z]+-[0-9]$", re.ASCII)
 _SAFE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$", re.ASCII)
 _HASH_RE = re.compile(r"^[a-f0-9]{64}$", re.ASCII)
+_SHORT_SAFE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$", re.ASCII)
 _ROUTES = MappingProxyType({
     "/internal/v1/stripe/offer": "POST",
     "/internal/v1/stripe/product-presentation": "POST",
@@ -44,11 +45,24 @@ _ROUTES = MappingProxyType({
     "/internal/v1/stripe/subscription/discount": "POST",
     "/internal/v1/stripe/subscription/pause": "POST",
     "/internal/v1/stripe/customer-portal": "POST",
+    "/internal/v1/stripe/migrations/preview": "POST",
+    "/internal/v1/stripe/migrations/execute": "POST",
+    "/internal/v1/stripe/migrations/control": "POST",
+    "/internal/v1/stripe/migrations/status": "GET",
 })
 _RETRYABLE_HTTP = frozenset({429, 500, 502, 503, 504})
 _ORDINARY_STATUSES = frozenset({"accepted", "pending", "needs_review"})
 _CHECKOUT_STATUSES = frozenset({
     "not_created", "pending", "paid", "terminal_unpaid", "unknown"
+})
+_MIGRATION_JOB_STATES = frozenset({
+    "previewing", "awaiting_approval", "scheduled", "running", "paused",
+    "cancel_requested", "canceling", "completed", "completed_with_errors", "canceled",
+})
+_MIGRATION_ITEM_STATES = frozenset({
+    "pending", "applying", "pending_payment", "pending_customer_action",
+    "pending_update_applied", "pending_update_expired", "applied", "reverted",
+    "skipped", "retryable_failure", "needs_review", "permanent_failure",
 })
 
 
@@ -85,7 +99,7 @@ class SigV4ExecuteApiTransport:
     ) -> None:
         if type(api_id) is not str or _API_ID_RE.fullmatch(api_id) is None:
             raise GatewayConfigurationError("Integrations gateway configuration is invalid")
-        if stage not in {"test", "prod"}:
+        if stage not in {"test", "production"}:
             raise GatewayConfigurationError("Integrations gateway configuration is invalid")
         if type(region) is not str or _REGION_RE.fullmatch(region) is None:
             raise GatewayConfigurationError("Integrations gateway configuration is invalid")
@@ -108,7 +122,8 @@ class SigV4ExecuteApiTransport:
             os.getenv("AWS_REGION", "").strip().lower()
             or os.getenv("AWS_DEFAULT_REGION", "").strip().lower()
         )
-        return cls(api_id=api_id, stage=environment, region=region)
+        integrations_stage = "production" if environment == "prod" else "test"
+        return cls(api_id=api_id, stage=integrations_stage, region=region)
 
     def request(self, method: str, path: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         if type(method) is not str or _ROUTES.get(path) != method:
@@ -395,12 +410,85 @@ class InternalIntegrationsGateway:
         idempotency_key: str,
         **_metadata: Any,
     ) -> dict[str, Any]:
+        if operation.startswith("migration"):
+            return self.execute_migration(
+                operation,
+                scope,
+                connection_id,
+                command_input,
+                expected_result_revision=_metadata.get("expected_result_revision"),
+            )
         return self.execute_subscription(
             operation,
             scope,
             connection_id,
             command_input,
             idempotency_key=idempotency_key,
+        )
+
+    def execute_migration(
+        self,
+        operation: str,
+        scope: CommerceScope,
+        connection_id: str,
+        command_input: Mapping[str, Any],
+        *,
+        expected_result_revision: Any = None,
+    ) -> dict[str, Any]:
+        specifications = {
+            "migrationPreview": ("POST", "/internal/v1/stripe/migrations/preview"),
+            "migrationExecute": ("POST", "/internal/v1/stripe/migrations/execute"),
+            "migrationPause": ("POST", "/internal/v1/stripe/migrations/control"),
+            "migrationResume": ("POST", "/internal/v1/stripe/migrations/control"),
+            "migrationCancel": ("POST", "/internal/v1/stripe/migrations/control"),
+            "migrationStatus": ("GET", "/internal/v1/stripe/migrations/status"),
+        }
+        selected = specifications.get(operation)
+        if selected is None:
+            raise GatewayConfigurationError("Integrations gateway route is invalid")
+        method, path = selected
+        parsed = _validated_migration_input(operation, command_input)
+        if operation == "migrationPreview":
+            expected_revision = 1
+        elif operation in {"migrationPause", "migrationResume", "migrationCancel"}:
+            expected_revision = parsed["expectedRevision"] + 1
+        elif operation == "migrationExecute":
+            try:
+                expected_revision = _positive_int(expected_result_revision)
+            except ValueError:
+                raise GatewayConfigurationError(
+                    "Integrations gateway revision is unavailable"
+                ) from None
+        else:
+            expected_revision = None
+        revision = _migration_identity_revision(operation, parsed)
+        content_hash = canonical_hash(parsed)
+        payload = _command_envelope(
+            scope,
+            connection_id,
+            parsed,
+            idempotency_key=_derived_idempotency(
+                scope,
+                connection_id,
+                operation,
+                parsed["commercialRequestId"],
+                revision,
+                content_hash,
+            ),
+        )
+        result = self._transport.request(method, path, payload)
+        if operation == "migrationStatus":
+            return _validated_migration_status(
+                result,
+                commercial_request_id=parsed["commercialRequestId"],
+                job_id=parsed["jobId"],
+                connection_id=connection_id,
+            )
+        return _validated_migration_command_result(
+            result,
+            payload["commandId"],
+            operation=operation,
+            expected_revision=expected_revision,
         )
 
     def _snapshot_command(
@@ -547,6 +635,263 @@ def _validated_ordinary_result(value: Any, command_id: str) -> dict[str, str]:
     ):
         raise IntegrationsUnavailable("Integrations service is unavailable")
     return {"commandId": command_id, "status": value["status"]}
+
+
+def _validated_migration_input(
+    operation: str, value: Mapping[str, Any]
+) -> dict[str, Any]:
+    selected = _plain_mapping(value)
+    if operation == "migrationPreview":
+        if set(selected) != {
+            "commercialRequestId", "sourceOffer", "targetOffer", "requestedPolicy",
+            "candidateScope", "canarySize", "accountConcurrency",
+        }:
+            raise ValueError("migration preview command is invalid")
+        _short_safe_id(selected.get("commercialRequestId"))
+        for field in ("sourceOffer", "targetOffer"):
+            binding = selected.get(field)
+            if not isinstance(binding, Mapping) or set(binding) != {
+                "offerVersionId", "revision", "schemaVersion", "snapshot", "contentHash"
+            }:
+                raise ValueError("migration preview command is invalid")
+            _short_safe_id(binding.get("offerVersionId"))
+            _positive_int(binding.get("revision"))
+            if binding.get("schemaVersion") != 1 or not isinstance(binding.get("snapshot"), Mapping):
+                raise ValueError("migration preview command is invalid")
+            if binding.get("contentHash") != canonical_hash({
+                "schemaVersion": 1,
+                "snapshot": binding["snapshot"],
+            }):
+                raise ValueError("migration preview command is invalid")
+        if (
+            selected.get("requestedPolicy") not in (
+                {"mode": "next_renewal"}, {"mode": "immediate_prorated"}
+            )
+            or selected.get("candidateScope") != {"kind": "all_matching_source_price"}
+            or type(selected.get("canarySize")) is not int
+            or not 1 <= selected["canarySize"] <= 25
+            or type(selected.get("accountConcurrency")) is not int
+            or not 1 <= selected["accountConcurrency"] <= 5
+        ):
+            raise ValueError("migration preview command is invalid")
+    elif operation == "migrationExecute":
+        if set(selected) != {
+            "commercialRequestId", "jobId", "dryRunRevision", "dryRunHash", "confirmation"
+        }:
+            raise ValueError("migration execute command is invalid")
+        _short_safe_id(selected.get("commercialRequestId"))
+        _short_safe_id(selected.get("jobId"))
+        _positive_int(selected.get("dryRunRevision"))
+        if (
+            type(selected.get("dryRunHash")) is not str
+            or _HASH_RE.fullmatch(selected["dryRunHash"]) is None
+            or selected.get("confirmation") is not True
+        ):
+            raise ValueError("migration execute command is invalid")
+    elif operation in {"migrationPause", "migrationResume", "migrationCancel"}:
+        if set(selected) != {
+            "commercialRequestId", "jobId", "expectedRevision", "action"
+        }:
+            raise ValueError("migration control command is invalid")
+        _short_safe_id(selected.get("commercialRequestId"))
+        _short_safe_id(selected.get("jobId"))
+        _positive_int(selected.get("expectedRevision"))
+        expected_action = {
+            "migrationPause": "pause",
+            "migrationResume": "resume",
+            "migrationCancel": "cancel",
+        }[operation]
+        if selected.get("action") != expected_action:
+            raise ValueError("migration control command is invalid")
+    elif operation == "migrationStatus":
+        if not {"commercialRequestId", "jobId"}.issubset(selected) or not set(selected).issubset({
+            "commercialRequestId", "jobId", "limit", "cursor"
+        }):
+            raise ValueError("migration status command is invalid")
+        _short_safe_id(selected.get("commercialRequestId"))
+        _short_safe_id(selected.get("jobId"))
+        if "limit" in selected and (
+            type(selected["limit"]) is not int or not 1 <= selected["limit"] <= 100
+        ):
+            raise ValueError("migration status command is invalid")
+        if "cursor" in selected:
+            _short_safe_id(selected["cursor"])
+    else:
+        raise GatewayConfigurationError("Integrations gateway route is invalid")
+    return selected
+
+
+def _migration_identity_revision(operation: str, value: Mapping[str, Any]) -> int:
+    if operation == "migrationPreview":
+        return _positive_int(value["targetOffer"]["revision"])
+    if operation == "migrationExecute":
+        return _positive_int(value["dryRunRevision"])
+    if operation in {"migrationPause", "migrationResume", "migrationCancel"}:
+        return _positive_int(value["expectedRevision"])
+    return 1
+
+
+def _validated_migration_command_result(
+    value: Any,
+    command_id: str,
+    *,
+    operation: str,
+    expected_revision: int | None,
+) -> dict[str, Any]:
+    allowed_statuses = (
+        frozenset({"accepted", "pending"})
+        if operation == "migrationPreview"
+        else _ORDINARY_STATUSES
+    )
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != {"commandId", "status", "jobId", "revision"}
+        or value.get("commandId") != command_id
+        or value.get("status") not in allowed_statuses
+    ):
+        raise IntegrationsUnavailable("Integrations service is unavailable")
+    try:
+        job_id = _short_safe_id(value.get("jobId"))
+        revision = _positive_int(value.get("revision"))
+    except ValueError:
+        raise IntegrationsUnavailable("Integrations service is unavailable") from None
+    if expected_revision is None:
+        raise IntegrationsUnavailable("Integrations service is unavailable")
+    if value["status"] in {"accepted", "pending"}:
+        valid_revision = revision == expected_revision
+    else:
+        valid_revision = (
+            operation == "migrationExecute" and revision < expected_revision
+        )
+    if not valid_revision:
+        raise IntegrationsUnavailable("Integrations service is unavailable")
+    return {
+        "commandId": command_id,
+        "status": value["status"],
+        "jobId": job_id,
+        "revision": revision,
+    }
+
+
+def _validated_migration_status(
+    value: Any,
+    *,
+    commercial_request_id: str,
+    job_id: str,
+    connection_id: str,
+) -> dict[str, Any]:
+    keys = {
+        "commercialRequestId", "jobId", "connectionId", "revision", "state",
+        "dryRunRevision", "dryRunHash", "expiresAt", "counts", "items", "nextCursor",
+    }
+    if not isinstance(value, Mapping) or set(value) != keys:
+        raise IntegrationsUnavailable("Integrations service is unavailable")
+    try:
+        if (
+            _short_safe_id(value.get("commercialRequestId")) != commercial_request_id
+            or _short_safe_id(value.get("jobId")) != job_id
+            or _short_safe_id(value.get("connectionId")) != connection_id
+        ):
+            raise ValueError
+        revision = _positive_int(value.get("revision"))
+        state = value.get("state")
+        if state not in _MIGRATION_JOB_STATES:
+            raise ValueError
+        dry_run_revision = value.get("dryRunRevision")
+        dry_run_hash = value.get("dryRunHash")
+        expires_at = value.get("expiresAt")
+        has_no_dry_run = (dry_run_revision, dry_run_hash, expires_at) == (
+            None,
+            None,
+            None,
+        )
+        if state == "previewing" or (state == "canceled" and has_no_dry_run):
+            if (dry_run_revision, dry_run_hash, expires_at) != (None, None, None):
+                raise ValueError
+        else:
+            dry_run_revision = _positive_int(dry_run_revision)
+            if type(dry_run_hash) is not str or _HASH_RE.fullmatch(dry_run_hash) is None:
+                raise ValueError
+            expires_at = _positive_int(expires_at)
+        counts = _migration_counts(value.get("counts"))
+        raw_items = value.get("items")
+        if type(raw_items) is not list or len(raw_items) > 100:
+            raise ValueError
+        items = [_migration_status_item(item) for item in raw_items]
+        next_cursor = value.get("nextCursor")
+        if next_cursor is not None:
+            next_cursor = _short_safe_id(next_cursor)
+    except (TypeError, ValueError):
+        raise IntegrationsUnavailable("Integrations service is unavailable") from None
+    return {
+        "commercialRequestId": commercial_request_id,
+        "jobId": job_id,
+        "connectionId": connection_id,
+        "revision": revision,
+        "state": state,
+        "dryRunRevision": dry_run_revision,
+        "dryRunHash": dry_run_hash,
+        "expiresAt": expires_at,
+        "counts": counts,
+        "items": items,
+        "nextCursor": next_cursor,
+    }
+
+
+def validate_migration_status_result(
+    value: Any,
+    *,
+    commercial_request_id: str,
+    job_id: str,
+    connection_id: str,
+) -> dict[str, Any]:
+    """Revalidate a protected status result at the browser-facing boundary."""
+
+    return _validated_migration_status(
+        value,
+        commercial_request_id=commercial_request_id,
+        job_id=job_id,
+        connection_id=connection_id,
+    )
+
+
+def _migration_status_item(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "itemId", "state", "reasonCode", "attempts"
+    }:
+        raise ValueError("migration item is invalid")
+    item_id = _short_safe_id(value.get("itemId"))
+    state = value.get("state")
+    reason = value.get("reasonCode")
+    attempts = value.get("attempts")
+    if state not in _MIGRATION_ITEM_STATES:
+        raise ValueError("migration item is invalid")
+    if reason is not None:
+        reason = _short_safe_id(reason)
+    if type(attempts) is not int or not 0 <= attempts <= 5:
+        raise ValueError("migration item is invalid")
+    return {"itemId": item_id, "state": state, "reasonCode": reason, "attempts": attempts}
+
+
+def _migration_counts(value: object) -> dict[str, int]:
+    keys = {"total", "pending", "applied", "needsReview", "failed"}
+    if not isinstance(value, Mapping) or set(value) != keys:
+        raise ValueError("migration counts are invalid")
+    counts = {}
+    for key in keys:
+        number = value[key]
+        if type(number) is not int or not 0 <= number <= MAX_COMMAND_INTEGER:
+            raise ValueError("migration counts are invalid")
+        counts[key] = number
+    if counts["total"] != sum(counts[key] for key in keys - {"total"}):
+        raise ValueError("migration counts are invalid")
+    return counts
+
+
+def _short_safe_id(value: Any) -> str:
+    if type(value) is not str or _SHORT_SAFE_ID_RE.fullmatch(value) is None:
+        raise ValueError("command identifier is invalid")
+    return value
 
 
 def _validated_redirect_result(

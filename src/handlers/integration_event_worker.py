@@ -11,10 +11,12 @@ try:
     from events import IntegrationEventProcessor, parse_integration_event
     from storage import CommerceStore
     from subscription_storage import SubscriptionProjectionStore
+    from migration_storage import MigrationRequestStore
 except ModuleNotFoundError:
     from src.events import IntegrationEventProcessor, parse_integration_event
     from src.storage import CommerceStore
     from src.subscription_storage import SubscriptionProjectionStore
+    from src.migration_storage import MigrationRequestStore
 
 
 MAX_EVENT_BYTES = 32 * 1024
@@ -79,6 +81,7 @@ def _processor_from_environment() -> IntegrationEventProcessor:
         _PROCESSOR = IntegrationEventProcessor(
             CommerceStore.from_environment(),
             SubscriptionProjectionStore.from_environment(),
+            MigrationRequestStore.from_environment(),
         )
     return _PROCESSOR
 

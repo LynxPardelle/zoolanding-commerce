@@ -353,8 +353,18 @@ class RepositoryContractTests(unittest.TestCase):
                 "Resource": operations_arn,
             }],
         )
+        catalog_arn = {"Fn::GetAtt": ["CommerceCatalogTable", "Arn"]}
+        self.assertEqual(
+            [statement for statement in statements if statement.get("Resource") == catalog_arn],
+            [{
+                "Effect": "Allow",
+                "Action": "dynamodb:GetItem",
+                "Resource": catalog_arn,
+            }],
+        )
         variables = resources["SubscriptionActionFunction"]["Properties"]["Environment"]["Variables"]
         self.assertEqual(variables["COMMERCE_OPERATIONS_TABLE_NAME"], {"Ref": "CommerceOperationsTable"})
+        self.assertEqual(variables["COMMERCE_CATALOG_TABLE_NAME"], {"Ref": "CommerceCatalogTable"})
 
     def test_internal_integrations_permissions_are_literal_method_and_route_scoped(self):
         resources = load_template()["Resources"]
@@ -371,6 +381,10 @@ class RepositoryContractTests(unittest.TestCase):
                 "POST/internal/v1/stripe/subscription/discount",
                 "POST/internal/v1/stripe/subscription/pause",
                 "POST/internal/v1/stripe/customer-portal",
+                "POST/internal/v1/stripe/migrations/preview",
+                "POST/internal/v1/stripe/migrations/execute",
+                "POST/internal/v1/stripe/migrations/control",
+                "GET/internal/v1/stripe/migrations/status",
             },
             "ReservationReconcilerRole": {
                 "GET/internal/v1/stripe/checkout-status"
@@ -378,8 +392,15 @@ class RepositoryContractTests(unittest.TestCase):
         }
         prefix = (
             "arn:${AWS::Partition}:execute-api:${AWS::Region}:"
-            "${AWS::AccountId}:${IntegrationsApiId}/${EnvironmentName}/"
+            "${AWS::AccountId}:${IntegrationsApiId}/${IntegrationsStage}/"
         )
+        expected_stage = {
+            "Fn::FindInMap": [
+                "IntegrationsStageByEnvironment",
+                {"Ref": "EnvironmentName"},
+                "Stage",
+            ]
+        }
         for role_id, suffixes in expected.items():
             statements = resources[role_id]["Properties"]["Policies"][0][
                 "PolicyDocument"
@@ -392,10 +413,16 @@ class RepositoryContractTests(unittest.TestCase):
             self.assertEqual(len(invoke), 1, role_id)
             actual = invoke[0]["Resource"]
             actual = actual if isinstance(actual, list) else [actual]
+            substitutions = [resource["Fn::Sub"] for resource in actual]
+            self.assertTrue(all(isinstance(value, list) for value in substitutions))
             self.assertEqual(
-                {resource["Fn::Sub"] for resource in actual},
+                {value[0] for value in substitutions},
                 {prefix + suffix for suffix in suffixes},
             )
+            self.assertTrue(all(
+                value[1] == {"IntegrationsStage": expected_stage}
+                for value in substitutions
+            ))
             self.assertNotIn("*", str(actual), role_id)
             variables = resources[role_id.removesuffix("Role") + "Function"][
                 "Properties"
@@ -440,6 +467,10 @@ class RepositoryContractTests(unittest.TestCase):
                     "commerce.payment.terminal_unpaid.v1",
                     "commerce.refund.confirmed.v1",
                     "commerce.subscription.updated.v1",
+                    "migration.preview_ready.v1",
+                    "migration.progressed.v1",
+                    "migration.item_needs_review.v1",
+                    "migration.completed.v1",
                 ]
             },
         )

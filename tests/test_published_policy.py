@@ -450,6 +450,40 @@ class PublishedPolicyResolverTests(unittest.TestCase):
                 with self.assertRaises(PolicyResolutionError):
                     self.resolve()
 
+    def test_migration_policy_is_optional_closed_bounded_and_has_server_defaults(self):
+        from src.common.published_policy import (
+            PolicyResolutionError,
+            validated_migration_policy,
+        )
+
+        self.assertEqual(validated_migration_policy(None), {
+            "canarySize": 5,
+            "accountConcurrency": 2,
+        })
+        payments = self.s3.objects[self.commerce_key]["commerce"]["payments"]
+        payments["migrationPolicy"] = {"canarySize": 25, "accountConcurrency": 5}
+        resolved = self.resolve().commerce["commerce"]["payments"]
+        self.assertEqual(resolved["migrationPolicy"], {
+            "canarySize": 25,
+            "accountConcurrency": 5,
+        })
+
+        for value in (
+            {"canarySize": 0, "accountConcurrency": 2},
+            {"canarySize": 26, "accountConcurrency": 2},
+            {"canarySize": 5, "accountConcurrency": 0},
+            {"canarySize": 5, "accountConcurrency": 6},
+            {"canarySize": True, "accountConcurrency": 2},
+            {"canarySize": 5, "accountConcurrency": 2, "provider": "stripe"},
+        ):
+            with self.subTest(value=value):
+                self.setUp()
+                self.s3.objects[self.commerce_key]["commerce"]["payments"][
+                    "migrationPolicy"
+                ] = value
+                with self.assertRaises(PolicyResolutionError):
+                    self.resolve()
+
     def test_requires_currency_policy_and_allows_at_most_one_notification_policy(self):
         from src.common.published_policy import PolicyResolutionError
 

@@ -14,6 +14,7 @@ except ModuleNotFoundError:
 
 
 _SAFE_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}", re.ASCII)
+_MIGRATION_ITEM_ID = re.compile(r"migration-item-[a-f0-9]{40}", re.ASCII)
 _CURRENCY = re.compile(r"[A-Z]{3}", re.ASCII)
 _ROOT_KEYS = frozenset(
     {
@@ -39,9 +40,43 @@ _EVENT_TYPES = frozenset(
         "commerce.payment.terminal_unpaid.v1",
         "commerce.refund.confirmed.v1",
         "commerce.subscription.updated.v1",
+        "migration.preview_ready.v1",
+        "migration.progressed.v1",
+        "migration.item_needs_review.v1",
+        "migration.completed.v1",
     }
 )
 _SUBSCRIPTION_STATUSES = frozenset({"active", "past_due", "canceled"})
+_MIGRATION_EVENT_TYPES = frozenset({
+    "migration.preview_ready.v1",
+    "migration.progressed.v1",
+    "migration.item_needs_review.v1",
+    "migration.completed.v1",
+})
+_MIGRATION_JOB_STATES = frozenset({
+    "draft", "previewing", "awaiting_approval", "scheduled", "running", "paused",
+    "cancel_requested", "canceling", "completed", "completed_with_errors", "canceled",
+})
+_MIGRATION_REASON_CODES = frozenset({
+    "ambiguous-price",
+    "near-term-schedule",
+    "nonpositive-proration",
+    "payment-failed",
+    "pending-invoice-items",
+    "pending-update",
+    "phase-limit",
+    "provider-unknown",
+    "retry-exhausted",
+    "scope-mismatch",
+    "snapshot-too-large",
+    "source-drift",
+    "tax-approval",
+    "unmapped-price",
+    "unpaid-invoice",
+    "unsupported-collection-mode",
+    "unsupported-payment-method",
+    "unsupported-schedule",
+})
 MAX_EVENT_FUTURE_SKEW_SECONDS = 300
 
 
@@ -91,6 +126,8 @@ def parse_integration_event(value: object) -> IntegrationEvent:
 
 
 def _data(event_type: str, value: Mapping[str, Any]) -> dict[str, Any]:
+    if event_type in _MIGRATION_EVENT_TYPES:
+        return _migration_data(event_type, value)
     if event_type.startswith("commerce.payment."):
         if set(value) != _PAYMENT_KEYS:
             raise ValueError
@@ -125,11 +162,17 @@ def _data(event_type: str, value: Mapping[str, Any]) -> dict[str, Any]:
 
 
 class IntegrationEventProcessor:
-    def __init__(self, store: CommerceStore, subscription_projector: Any = None) -> None:
+    def __init__(
+        self,
+        store: CommerceStore,
+        subscription_projector: Any = None,
+        migration_store: Any = None,
+    ) -> None:
         if type(store) is not CommerceStore:
             raise ValueError("store must be a CommerceStore")
         self.store = store
         self.subscription_projector = subscription_projector
+        self.migration_store = migration_store
 
     def process(self, event: IntegrationEvent, *, now_epoch: int) -> dict[str, Any]:
         if type(event) is not IntegrationEvent:
@@ -138,6 +181,19 @@ class IntegrationEventProcessor:
         if event.occurred_at > now_epoch + MAX_EVENT_FUTURE_SKEW_SECONDS:
             raise IntegrationEventValidationError("integration event timestamp is invalid")
         data = event.data
+        if event.event_type in _MIGRATION_EVENT_TYPES:
+            if self.migration_store is None or not hasattr(
+                self.migration_store, "apply_verified_event"
+            ):
+                raise RuntimeError("migration storage is unavailable")
+            return self.migration_store.apply_verified_event(
+                event.scope,
+                event_id=event.event_id,
+                event_type=event.event_type,
+                occurred_at=event.occurred_at,
+                data=dict(data),
+                now_epoch=now_epoch,
+            )
         if event.event_type in {
             "commerce.payment.succeeded.v1",
             "commerce.payment.terminal_unpaid.v1",
@@ -194,3 +250,76 @@ def _positive_int(value: object) -> int:
     if type(value) is not int or not 1 <= value <= 9_999_999_999:
         raise ValueError
     return value
+
+
+def _migration_data(event_type: str, value: Mapping[str, Any]) -> dict[str, Any]:
+    common = {"commercialRequestId", "jobId", "connectionId", "revision", "dedupeKey"}
+    extras = {
+        "migration.preview_ready.v1": {
+            "dryRunRevision", "dryRunHash", "expiresAt", "counts"
+        },
+        "migration.progressed.v1": {"state", "counts"},
+        "migration.item_needs_review.v1": {"itemId", "reasonCode"},
+        "migration.completed.v1": {"state", "counts"},
+    }[event_type]
+    if set(value) != common | extras:
+        raise ValueError
+    selected = {
+        "commercialRequestId": _safe_id(value["commercialRequestId"]),
+        "jobId": _safe_id(value["jobId"]),
+        "connectionId": _safe_id(value["connectionId"]),
+        "revision": _positive_int(value["revision"]),
+        "dedupeKey": _safe_id(value["dedupeKey"]),
+    }
+    if event_type == "migration.preview_ready.v1":
+        dry_hash = value["dryRunHash"]
+        if type(dry_hash) is not str or re.fullmatch(r"[a-f0-9]{64}", dry_hash, re.ASCII) is None:
+            raise ValueError
+        selected.update({
+            "dryRunRevision": _positive_int(value["dryRunRevision"]),
+            "dryRunHash": dry_hash,
+            "expiresAt": _positive_int(value["expiresAt"]),
+            "counts": _migration_counts(value["counts"]),
+        })
+    elif event_type in {"migration.progressed.v1", "migration.completed.v1"}:
+        state = value["state"]
+        if type(state) is not str or state not in _MIGRATION_JOB_STATES:
+            raise ValueError
+        if event_type == "migration.completed.v1" and state not in {
+            "completed", "completed_with_errors", "canceled"
+        }:
+            raise ValueError
+        if event_type == "migration.progressed.v1" and state in {
+            "completed", "completed_with_errors", "canceled"
+        }:
+            raise ValueError
+        selected.update({"state": state, "counts": _migration_counts(value["counts"])})
+    else:
+        item_id = value["itemId"]
+        reason_code = value["reasonCode"]
+        if (
+            type(item_id) is not str
+            or _MIGRATION_ITEM_ID.fullmatch(item_id) is None
+            or reason_code not in _MIGRATION_REASON_CODES
+        ):
+            raise ValueError
+        selected.update({
+            "itemId": item_id,
+            "reasonCode": reason_code,
+        })
+    return selected
+
+
+def _migration_counts(value: object) -> dict[str, int]:
+    keys = {"total", "pending", "applied", "needsReview", "failed"}
+    if not isinstance(value, Mapping) or set(value) != keys:
+        raise ValueError
+    selected = {}
+    for key in keys:
+        item = value[key]
+        if type(item) is not int or not 0 <= item <= 9_999_999_999:
+            raise ValueError
+        selected[key] = item
+    if selected["total"] != sum(selected[key] for key in keys - {"total"}):
+        raise ValueError
+    return selected

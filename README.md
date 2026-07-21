@@ -2,7 +2,7 @@
 
 Generic server-only commercial state for draft-configured catalogs, immutable offers, inventory, orders, subscriptions, fulfillment, migration requests, and isolated manual fiscal requests.
 
-Phase 4 Commerce wiring is implemented and verified locally at `2b495fdcf68132729863496b7a483fb44d69cf13`; it remains undeployed. The local service includes the immutable policy resolver, retained storage, provider-neutral domain rules, conditional inventory transactions, eight literal browser routes, exact AWS_IAM Integrations commands/status lookup, normalized integration-event consumption, an idempotent notification outbox, subscription projections, reservation reconciliation, and isolated manual fiscal intake. There is no AWS `dev` environment. Test and production deployment remain closed until their external identities, alarms, quotas, cross-service dependencies, and live gates are reviewed and explicitly approved.
+The Phase 5 Commerce boundary is implemented and verified locally; it remains undeployed. The local service includes the immutable policy resolver, retained storage, provider-neutral domain rules, conditional inventory transactions, eight literal browser routes, exact AWS_IAM Integrations commands/status lookup, normalized integration-event consumption, an idempotent notification outbox, subscription projections, resumable bulk-migration requests and approval, reservation reconciliation, and isolated manual fiscal intake. There is no AWS `dev` environment. Test and production deployment remain closed until their external identities, alarms, quotas, cross-service dependencies, and live gates are reviewed and explicitly approved.
 
 ## Boundaries
 
@@ -55,6 +55,19 @@ Every money value requires the owning provider/policy currency allowlist and fai
 
 Subscription commands remain provider-neutral and use the exact implemented AWS_IAM command gateway for bounded subscription changes, discounts, pause policy, and fresh Customer Portal handoffs. The gateway is local-only until an approved deployment supplies `IntegrationsApiId`; it never accepts provider credentials or account identifiers from the browser. Fiscal PII is accepted only by the isolated fiscal routes/table after opt-in and live-gate checks; it is not written to drafts, Data Spaces, events, logs, or general Commerce projections. Data Spaces activation snapshots and every AWS/provider-backed rollout remain later authorized work.
 
+## Bulk Subscription Migration
+
+Commerce owns the durable commercial request and operator approval, while Integrations owns provider jobs and item execution:
+
+- preview resolves immutable source and target OfferVersions server-side, binds their exact schema-versioned snapshots and hashes, and sends only the draft scope, configured connection, closed policy, aggregate limits, commercial request ID, and technical idempotency metadata;
+- the `MigrationRequest` is retained business state and deliberately has no DynamoDB TTL. Raw idempotency values and operator identities are never stored: Commerce retains scoped SHA-256 digests and a scoped actor hash;
+- every bulk-migration operation (preview, execute, pause, resume, cancel, and protected status) requires the distinct `subscription:migration:execute` capability; every mutation also requires fresh Auth Admin state and CSRF;
+- execution requires explicit browser confirmation plus an exact, unexpired dry-run revision/hash approved by the current actor. Browser input cannot choose a provider account, connection, snapshots, candidate scope, canary, or concurrency;
+- preview, execute, and control use literal AWS_IAM Integrations routes. A persisted-but-not-dispatched `pending` result returns a retryable error without advancing Commerce or creating a local command receipt, so an exact retry can safely resume dispatch;
+- cancel can reopen a `completed` or `completed_with_errors` request as `cancel_requested` so Integrations can remove owned future next-renewal schedules. Integrations remains the authoritative guard: it accepts that terminal rollback only for `next_renewal` jobs that retain applied items with owned Schedule IDs, restores or releases validated phases, and never cancels the active subscription;
+- command and normalized-event receipts expire after 90 days, are scope/input-hash/result bound, and reject idempotency-key reuse with changed dry-run proof, confirmation, control action, or expected revision. Every accepted command receipt retains only the scoped pseudonymous actor hash; exact replays preserve that original attribution and remain available only after the caller passes current authorization. Command results must advance the exact expected Integrations revision, while closed `needs_review` results may only reference an existing earlier/current revision. State and state-revision checks accept valid same-revision item progress while preventing stale events, conflicting progress snapshots for one revision, or multiple distinct transitions from rolling a request backward;
+- public projections contain only the commercial request/job IDs, state, revisions, the closed latest-command signal `null|accepted|needs_review`, dry-run proof metadata, expiry, and aggregate counts. `needs_review` preserves the safe command outcome without exposing a provider reason or payload. No provider payload, customer PII, credential, bank data, or signed URL is stored or returned.
+
 ## Inventory Transactions
 
 `src/domain/inventory.py`, `src/domain/orders.py`, and `src/storage.py` implement the local TASK-029 contract:
@@ -79,7 +92,7 @@ The API uses separate literal POST routes instead of a body-selected IAM router:
 - `/features/commerce/read` is protected by `commerce:catalog:read`;
 - `/features/commerce/catalog/action` is protected by `commerce:catalog:write`, CSRF, conditional revisions, and a durable 90-day Operations idempotency receipt;
 - `/features/commerce/inventory/action` is protected by `commerce:inventory:write` and uses the policy-owned stock location;
-- `/features/commerce/subscription/action` is protected by `commerce:subscription:manage` and calls only the exact signed Integrations subscription and Customer Portal routes;
+- `/features/commerce/subscription/action` calls only exact signed Integrations routes. Regular subscription actions use `commerce:subscription:manage`; all six bulk-migration operations use `subscription:migration:execute`;
 - `/features/commerce/public-action` admits bounded Checkout requests using server-resolved scope, time, IDs, location, prices, the draft's closed currency allowlist, and a same-version notification target. Its `Idempotency-Key` is a recovery capability: the draft runtime must generate exactly 32 cryptographically random bytes, encode them as canonical unpadded base64url, keep the raw value out of logs/storage, and reuse it only for the exact lost-response retry;
 - `/features/commerce/fiscal/request` accepts a same-origin, single-use order-access proof only after verified payment state makes it eligible;
 - `/features/commerce/fiscal/admin` uses the distinct `commerce:fiscal:manage` capability and Fiscal-only PII access.
@@ -94,11 +107,11 @@ In test, a fiscal-enabled Checkout returns a random opaque proof while Commerce 
 
 The local SAM contract requires an environment-specific Integrations API identifier, Config Registry table and payload bucket names, Auth Admin session/state table names, the normalized Integration Events topic ARN, and a NoEcho Commerce cursor-signing key. Production fiscal capture additionally remains closed behind its explicit approval identifiers and code gate. This README records no parameter value, secret, account identifier, or deployed resource.
 
-The reservation reconciler's five-minute schedule is declared but disabled. Phase 8 must verify the exact cross-service IAM routes, deployment parameters, queues/topics, alarms, quotas, rollback, and provider-status evidence before explicitly enabling it. No local Phase 4 result authorizes an AWS deployment or schedule activation.
+The reservation reconciler's five-minute schedule is declared but disabled. Phase 8 must verify the exact cross-service IAM routes, deployment parameters, queues/topics, alarms, quotas, rollback, and provider-status evidence before explicitly enabling it. No local Phase 5 result authorizes an AWS deployment or schedule activation.
 
 ## Local Verification
 
-The final Phase 4 commit passed 206 unit and contract tests. One local test is intentionally skipped when `botocore`, supplied by the Lambda/SAM runtime, is not importable from the workstation interpreter.
+The Phase 5 working tree passes 245 unit and contract tests. One local test is intentionally skipped when `botocore`, supplied by the Lambda/SAM runtime, is not importable from the workstation interpreter.
 
 ```powershell
 python -m unittest discover -s tests -p "test_*.py"

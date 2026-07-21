@@ -17,6 +17,7 @@ COMMERCE_CAPABILITIES = {
     "commerce:catalog:write",
     "commerce:inventory:write",
     "commerce:subscription:manage",
+    "subscription:migration:execute",
     "commerce:fiscal:manage",
 }
 SELLABLE_TYPES = {"physical", "service", "subscription", "add_on"}
@@ -367,9 +368,10 @@ def _validate_payments(value: Any) -> dict[str, Any]:
         "planChangePolicy",
         "pausePolicy",
     }
-    if not isinstance(value, dict) or set(value) not in (
-        required_keys,
-        required_keys | {"taxPolicy"},
+    if (
+        not isinstance(value, dict)
+        or not required_keys.issubset(value)
+        or not set(value).issubset(required_keys | {"taxPolicy", "migrationPolicy"})
     ):
         raise PolicyResolutionError("Published Commerce policy is invalid")
     _safe_id(value.get("bindingId"))
@@ -394,6 +396,7 @@ def _validate_payments(value: Any) -> dict[str, Any]:
         raise PolicyResolutionError("Published Commerce policy is invalid")
     validated_plan_change_policy(value.get("planChangePolicy"))
     validated_pause_policy(value.get("pausePolicy"))
+    validated_migration_policy(value.get("migrationPolicy"))
     if "taxPolicy" in value:
         tax_policy = value["taxPolicy"]
         if (
@@ -403,6 +406,26 @@ def _validate_payments(value: Any) -> dict[str, Any]:
         ):
             raise PolicyResolutionError("Published Commerce policy is invalid")
     return value
+
+
+def validated_migration_policy(value: Any) -> dict[str, int]:
+    if value is None:
+        return {"canarySize": 5, "accountConcurrency": 2}
+    if not isinstance(value, dict) or set(value) != {"canarySize", "accountConcurrency"}:
+        raise PolicyResolutionError("Published Commerce policy is invalid")
+    canary_size = value.get("canarySize")
+    account_concurrency = value.get("accountConcurrency")
+    if (
+        type(canary_size) is not int
+        or not 1 <= canary_size <= 25
+        or type(account_concurrency) is not int
+        or not 1 <= account_concurrency <= 5
+    ):
+        raise PolicyResolutionError("Published Commerce policy is invalid")
+    return {
+        "canarySize": canary_size,
+        "accountConcurrency": account_concurrency,
+    }
 
 
 def validated_plan_change_policy(value: Any) -> dict[str, str]:

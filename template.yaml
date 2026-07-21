@@ -59,6 +59,13 @@ Parameters:
     MaxLength: 128
     AllowedPattern: ^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-][AQgw]|[A-Za-z0-9_-]{2}[AEIMQUYcgkosw048])?$
 
+Mappings:
+  IntegrationsStageByEnvironment:
+    test:
+      Stage: test
+    prod:
+      Stage: production
+
 Globals:
   Function:
     Runtime: python3.13
@@ -348,6 +355,10 @@ Resources:
           - commerce.payment.terminal_unpaid.v1
           - commerce.refund.confirmed.v1
           - commerce.subscription.updated.v1
+          - migration.preview_ready.v1
+          - migration.progressed.v1
+          - migration.item_needs_review.v1
+          - migration.completed.v1
       TopicArn:
         Ref: IntegrationEventsTopicArn
 
@@ -639,10 +650,18 @@ Resources:
               - Effect: Allow
                 Action: execute-api:Invoke
                 Resource:
-                  - Fn::Sub: arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${EnvironmentName}/POST/internal/v1/stripe/offer
-                  - Fn::Sub: arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${EnvironmentName}/POST/internal/v1/stripe/product-presentation
-                  - Fn::Sub: arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${EnvironmentName}/POST/internal/v1/stripe/discount
-                  - Fn::Sub: arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${EnvironmentName}/POST/internal/v1/stripe/discount-lifecycle
+                  - Fn::Sub:
+                      - arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${IntegrationsStage}/POST/internal/v1/stripe/offer
+                      - IntegrationsStage: { Fn::FindInMap: [IntegrationsStageByEnvironment, { Ref: EnvironmentName }, Stage] }
+                  - Fn::Sub:
+                      - arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${IntegrationsStage}/POST/internal/v1/stripe/product-presentation
+                      - IntegrationsStage: { Fn::FindInMap: [IntegrationsStageByEnvironment, { Ref: EnvironmentName }, Stage] }
+                  - Fn::Sub:
+                      - arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${IntegrationsStage}/POST/internal/v1/stripe/discount
+                      - IntegrationsStage: { Fn::FindInMap: [IntegrationsStageByEnvironment, { Ref: EnvironmentName }, Stage] }
+                  - Fn::Sub:
+                      - arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${IntegrationsStage}/POST/internal/v1/stripe/discount-lifecycle
+                      - IntegrationsStage: { Fn::FindInMap: [IntegrationsStageByEnvironment, { Ref: EnvironmentName }, Stage] }
       Tags:
         - Key: Project
           Value: Zoolandingpage
@@ -760,7 +779,9 @@ Resources:
               - Effect: Allow
                 Action: execute-api:Invoke
                 Resource:
-                  Fn::Sub: arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${EnvironmentName}/POST/internal/v1/stripe/checkout
+                  Fn::Sub:
+                    - arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${IntegrationsStage}/POST/internal/v1/stripe/checkout
+                    - IntegrationsStage: { Fn::FindInMap: [IntegrationsStageByEnvironment, { Ref: EnvironmentName }, Stage] }
       Tags:
         - Key: Project
           Value: Zoolandingpage
@@ -812,6 +833,12 @@ Resources:
                     - CommerceOperationsTable
                     - Arn
               - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource:
+                  Fn::GetAtt:
+                    - CommerceCatalogTable
+                    - Arn
+              - Effect: Allow
                 Action: s3:GetObject
                 Resource:
                   - Fn::Sub: arn:${AWS::Partition}:s3:::${ConfigPayloadsBucketName}/sites/*/versions/*/*/server/commerce.json
@@ -819,10 +846,30 @@ Resources:
               - Effect: Allow
                 Action: execute-api:Invoke
                 Resource:
-                  - Fn::Sub: arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${EnvironmentName}/POST/internal/v1/stripe/subscription/change
-                  - Fn::Sub: arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${EnvironmentName}/POST/internal/v1/stripe/subscription/discount
-                  - Fn::Sub: arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${EnvironmentName}/POST/internal/v1/stripe/subscription/pause
-                  - Fn::Sub: arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${EnvironmentName}/POST/internal/v1/stripe/customer-portal
+                  - Fn::Sub:
+                      - arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${IntegrationsStage}/POST/internal/v1/stripe/subscription/change
+                      - IntegrationsStage: { Fn::FindInMap: [IntegrationsStageByEnvironment, { Ref: EnvironmentName }, Stage] }
+                  - Fn::Sub:
+                      - arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${IntegrationsStage}/POST/internal/v1/stripe/subscription/discount
+                      - IntegrationsStage: { Fn::FindInMap: [IntegrationsStageByEnvironment, { Ref: EnvironmentName }, Stage] }
+                  - Fn::Sub:
+                      - arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${IntegrationsStage}/POST/internal/v1/stripe/subscription/pause
+                      - IntegrationsStage: { Fn::FindInMap: [IntegrationsStageByEnvironment, { Ref: EnvironmentName }, Stage] }
+                  - Fn::Sub:
+                      - arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${IntegrationsStage}/POST/internal/v1/stripe/customer-portal
+                      - IntegrationsStage: { Fn::FindInMap: [IntegrationsStageByEnvironment, { Ref: EnvironmentName }, Stage] }
+                  - Fn::Sub:
+                      - arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${IntegrationsStage}/POST/internal/v1/stripe/migrations/preview
+                      - IntegrationsStage: { Fn::FindInMap: [IntegrationsStageByEnvironment, { Ref: EnvironmentName }, Stage] }
+                  - Fn::Sub:
+                      - arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${IntegrationsStage}/POST/internal/v1/stripe/migrations/execute
+                      - IntegrationsStage: { Fn::FindInMap: [IntegrationsStageByEnvironment, { Ref: EnvironmentName }, Stage] }
+                  - Fn::Sub:
+                      - arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${IntegrationsStage}/POST/internal/v1/stripe/migrations/control
+                      - IntegrationsStage: { Fn::FindInMap: [IntegrationsStageByEnvironment, { Ref: EnvironmentName }, Stage] }
+                  - Fn::Sub:
+                      - arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${IntegrationsStage}/GET/internal/v1/stripe/migrations/status
+                      - IntegrationsStage: { Fn::FindInMap: [IntegrationsStageByEnvironment, { Ref: EnvironmentName }, Stage] }
       Tags:
         - Key: Project
           Value: Zoolandingpage
@@ -1000,7 +1047,9 @@ Resources:
               - Effect: Allow
                 Action: execute-api:Invoke
                 Resource:
-                  Fn::Sub: arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${EnvironmentName}/GET/internal/v1/stripe/checkout-status
+                  Fn::Sub:
+                    - arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${IntegrationsApiId}/${IntegrationsStage}/GET/internal/v1/stripe/checkout-status
+                    - IntegrationsStage: { Fn::FindInMap: [IntegrationsStageByEnvironment, { Ref: EnvironmentName }, Stage] }
       Tags:
         - Key: Project
           Value: Zoolandingpage
@@ -1198,6 +1247,8 @@ Resources:
           - Arn
       Environment:
         Variables:
+          COMMERCE_CATALOG_TABLE_NAME:
+            Ref: CommerceCatalogTable
           COMMERCE_OPERATIONS_TABLE_NAME:
             Ref: CommerceOperationsTable
           CONFIG_REGISTRY_TABLE_NAME:
