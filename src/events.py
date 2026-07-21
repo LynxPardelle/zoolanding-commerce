@@ -41,7 +41,7 @@ _EVENT_TYPES = frozenset(
         "commerce.subscription.updated.v1",
     }
 )
-_SUBSCRIPTION_STATUSES = frozenset({"active", "past_due", "paused", "canceled"})
+_SUBSCRIPTION_STATUSES = frozenset({"active", "past_due", "canceled"})
 MAX_EVENT_FUTURE_SKEW_SECONDS = 300
 
 

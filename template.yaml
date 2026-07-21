@@ -788,6 +788,14 @@ Resources:
                   - Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AuthSessionTableName}
                   - Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AuthUserStateTableName}
               - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:TransactWriteItems
+                Resource:
+                  Fn::GetAtt:
+                    - CommerceOperationsTable
+                    - Arn
+              - Effect: Allow
                 Action: s3:GetObject
                 Resource:
                   - Fn::Sub: arn:${AWS::Partition}:s3:::${ConfigPayloadsBucketName}/sites/*/versions/*/*/server/commerce.json
@@ -1159,6 +1167,8 @@ Resources:
           - Arn
       Environment:
         Variables:
+          COMMERCE_OPERATIONS_TABLE_NAME:
+            Ref: CommerceOperationsTable
           CONFIG_REGISTRY_TABLE_NAME:
             Ref: ConfigRegistryTableName
           CONFIG_PAYLOADS_BUCKET_NAME:

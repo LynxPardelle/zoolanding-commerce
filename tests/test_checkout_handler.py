@@ -290,6 +290,41 @@ class CheckoutHandlerContractTests(unittest.TestCase):
             self.assertEqual(response["statusCode"], 403)
             resolver.assert_not_called()
 
+    def test_test_front_door_rejects_multivalue_origin_and_domain_pollution(self):
+        from src.handlers import checkout
+
+        payload = {
+            "operation": "admitCheckout",
+            "input": {"lines": [{"offerVersionId": "offer-1", "quantity": 1}]},
+        }
+        polluted_events = []
+        for values in (["other.example.com"], ["example.com", "other.example.com"]):
+            event = checkout_event(payload)
+            event["multiValueQueryStringParameters"] = {"draftDomain": values}
+            polluted_events.append(event)
+        for values in (
+            ["https://evil.example"],
+            ["https://test.zoolandingpage.com.mx", "https://evil.example"],
+        ):
+            event = checkout_event(payload)
+            event["multiValueHeaders"] = {"origin": values}
+            polluted_events.append(event)
+
+        for event in polluted_events:
+            with self.subTest(event=event), patch.object(checkout, "resolve_checkout_policy") as resolver:
+                response = checkout.lambda_handler(event, None)
+            self.assertEqual(response["statusCode"], 403)
+            resolver.assert_not_called()
+
+        checkout._validate_origin_binding(
+            {
+                **checkout_event(payload),
+                "multiValueHeaders": {"Origin": ["https://test.zoolandingpage.com.mx"]},
+                "multiValueQueryStringParameters": {"draftDomain": ["example.com"]},
+            },
+            "example.com",
+        )
+
     def test_production_accepts_only_the_exact_canonical_origin_and_no_preview_binding(self):
         from src.handlers import checkout
 

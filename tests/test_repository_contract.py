@@ -329,6 +329,27 @@ class RepositoryContractTests(unittest.TestCase):
                 self.assertNotEqual(statement.get("Resource"), "*", role_id)
                 self.assertNotIn("*", statement.get("Resource", []), role_id)
 
+    def test_subscription_action_has_only_the_operations_write_surface_it_needs(self):
+        resources = load_template()["Resources"]
+        role = resources["SubscriptionActionRole"]["Properties"]
+        statements = role["Policies"][0]["PolicyDocument"]["Statement"]
+        operations_arn = {"Fn::GetAtt": ["CommerceOperationsTable", "Arn"]}
+        operation_statements = [
+            statement
+            for statement in statements
+            if statement.get("Resource") == operations_arn
+        ]
+        self.assertEqual(
+            operation_statements,
+            [{
+                "Effect": "Allow",
+                "Action": ["dynamodb:GetItem", "dynamodb:TransactWriteItems"],
+                "Resource": operations_arn,
+            }],
+        )
+        variables = resources["SubscriptionActionFunction"]["Properties"]["Environment"]["Variables"]
+        self.assertEqual(variables["COMMERCE_OPERATIONS_TABLE_NAME"], {"Ref": "CommerceOperationsTable"})
+
     def test_cursor_signing_key_is_injected_only_into_catalog_readers(self):
         resources = load_template()["Resources"]
         functions = {

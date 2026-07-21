@@ -76,8 +76,8 @@ def main():
             "logs:CreateLogStream", "logs:PutLogEvents", "s3:GetObject",
         },
         "SubscriptionActionRole": {
-            "dynamodb:GetItem", "logs:CreateLogStream", "logs:PutLogEvents",
-            "s3:GetObject",
+            "dynamodb:GetItem", "dynamodb:TransactWriteItems",
+            "logs:CreateLogStream", "logs:PutLogEvents", "s3:GetObject",
         },
         "FiscalRequestRole": {
             "dynamodb:GetItem", "dynamodb:TransactWriteItems",

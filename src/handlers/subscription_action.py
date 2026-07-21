@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 try:  # Lambda CodeUri is src/.
+    from subscription_storage import SubscriptionCommandStore
     from common.auth_admin import authorize_request
     from common.http import (
         HttpError,
@@ -26,6 +27,7 @@ try:  # Lambda CodeUri is src/.
         validated_plan_change_policy,
     )
 except ModuleNotFoundError:  # Repository-root tests import src.*.
+    from src.subscription_storage import SubscriptionCommandStore
     from src.common.auth_admin import authorize_request
     from src.common.http import (
         HttpError,
@@ -82,16 +84,32 @@ def _handle(event: dict[str, Any], payload: dict[str, Any], request_id: str) -> 
         capability=CAPABILITY,
         mutation=True,
     )
-    command_input = _command_input(operation, input_value, commerce)
+    scope = resolved_scope(policies)
+    command_input = _command_input(
+        operation,
+        input_value,
+        commerce,
+        scope=scope,
+        idempotency_key=idempotency_key,
+    )
     result = _gateway().execute(
         operation,
-        resolved_scope(policies),
+        scope,
         command_input,
         idempotency_key=idempotency_key,
         request_id=request_id,
         actor_hash=hashlib.sha256(context.subject.encode("utf-8")).hexdigest(),
     )
-    return _validated_gateway_result(result)
+    validated_result = _validated_gateway_result(result)
+    if operation in {"pause", "resume"} and validated_result["status"] == "accepted":
+        _subscription_command_store().apply_access_transition(
+            scope,
+            command_input,
+            command_id=validated_result["commandId"],
+            idempotency_key=idempotency_key,
+            now_epoch=int(time.time()),
+        )
+    return validated_result
 
 
 def _validated_input(operation: str, value: Any) -> dict[str, Any]:
@@ -118,6 +136,9 @@ def _command_input(
     operation: str,
     input_value: dict[str, Any],
     commerce: dict[str, Any],
+    *,
+    scope: Any,
+    idempotency_key: str,
 ) -> dict[str, Any]:
     payments = commerce.get("payments")
     if not isinstance(payments, dict) or payments.get("subscriptions") is not True:
@@ -139,11 +160,18 @@ def _command_input(
                     "Service temporarily unavailable.",
                     retryable=True,
                 )
-            command_input["previewTimestamp"] = preview_timestamp
+            command_input["previewTimestamp"] = _subscription_command_store().preview_timestamp(
+                scope,
+                operation,
+                command_input,
+                idempotency_key=idempotency_key,
+                now_epoch=preview_timestamp,
+            )
     elif operation in {"pause", "resume"}:
         policy = validated_pause_policy(payments.get("pausePolicy"))
         if policy["enabled"] is not True:
             raise _forbidden()
+        command_input["action"] = "pause" if operation == "pause" else "resume"
         command_input["pausePolicy"] = policy
     return command_input
 
@@ -160,7 +188,7 @@ def _validated_gateway_result(value: Any) -> dict[str, str]:
     except HttpError:
         raise HttpError(503, "upstream_unavailable", "Service temporarily unavailable.", retryable=True) from None
     status = value.get("status")
-    if status not in {"accepted", "pending"}:
+    if status not in {"accepted", "pending", "needs_review"}:
         raise HttpError(503, "upstream_unavailable", "Service temporarily unavailable.", retryable=True)
     return {"commandId": command_id, "status": status}
 
@@ -168,3 +196,7 @@ def _validated_gateway_result(value: Any) -> dict[str, str]:
 def _gateway() -> UnavailableSubscriptionGateway:
     # TASK-040 replaces this fail-closed boundary with exact AWS_IAM commands.
     return UnavailableSubscriptionGateway()
+
+
+def _subscription_command_store() -> SubscriptionCommandStore:
+    return SubscriptionCommandStore.from_environment()

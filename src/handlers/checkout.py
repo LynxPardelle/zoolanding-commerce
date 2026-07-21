@@ -14,7 +14,6 @@ try:
         closed_object,
         dispatch,
         domain_header,
-        header,
         positive_int,
         public_checkout_idempotency_header,
         resolved_scope,
@@ -39,7 +38,6 @@ except ModuleNotFoundError:
         closed_object,
         dispatch,
         domain_header,
-        header,
         positive_int,
         public_checkout_idempotency_header,
         resolved_scope,
@@ -174,15 +172,8 @@ def _validate_origin_binding(event: dict[str, Any], domain: str) -> None:
     environment = os.getenv("ENVIRONMENT_NAME", "").strip().lower()
     if environment == "prod":
         environment = "production"
-    origin = header(event, "origin")
-    query = event.get("queryStringParameters")
-    if query is None:
-        query = {}
-    if not isinstance(query, dict) or any(
-        type(key) is not str or type(value) is not str
-        for key, value in query.items()
-    ):
-        raise _origin_forbidden()
+    origin = _single_origin(event)
+    query = _single_preview_query(event)
     if environment == "production":
         if origin != f"https://{domain}" or query:
             raise _origin_forbidden()
@@ -194,6 +185,81 @@ def _validate_origin_binding(event: dict[str, Any], domain: str) -> None:
         raise policy_unavailable()
     if origin != configured_origin or query != {"draftDomain": domain}:
         raise _origin_forbidden()
+
+
+def _single_origin(event: dict[str, Any]) -> str:
+    headers = event.get("headers")
+    if headers is None:
+        headers = {}
+    if not isinstance(headers, dict):
+        raise _origin_forbidden()
+    singular = [
+        value
+        for key, value in headers.items()
+        if type(key) is str and key.lower() == "origin"
+    ]
+    if len(singular) > 1 or any(type(value) is not str for value in singular):
+        raise _origin_forbidden()
+    singular_value = singular[0].strip() if singular else None
+
+    multi_headers = event.get("multiValueHeaders")
+    if multi_headers is None:
+        multi_headers = {}
+    if not isinstance(multi_headers, dict):
+        raise _origin_forbidden()
+    multi = [
+        value
+        for key, value in multi_headers.items()
+        if type(key) is str and key.lower() == "origin"
+    ]
+    if len(multi) > 1:
+        raise _origin_forbidden()
+    multi_value = None
+    if multi:
+        values = multi[0]
+        if (
+            not isinstance(values, list)
+            or len(values) != 1
+            or type(values[0]) is not str
+        ):
+            raise _origin_forbidden()
+        multi_value = values[0].strip()
+    if singular_value is not None and multi_value is not None and singular_value != multi_value:
+        raise _origin_forbidden()
+    return singular_value if singular_value is not None else multi_value or ""
+
+
+def _single_preview_query(event: dict[str, Any]) -> dict[str, str]:
+    query = event.get("queryStringParameters")
+    if query is None:
+        query = {}
+    multi_query = event.get("multiValueQueryStringParameters")
+    if multi_query is None:
+        multi_query = {}
+    if not isinstance(query, dict) or not isinstance(multi_query, dict):
+        raise _origin_forbidden()
+    if set(query) - {"draftDomain"} or set(multi_query) - {"draftDomain"}:
+        raise _origin_forbidden()
+    if any(type(key) is not str for key in query) or any(type(key) is not str for key in multi_query):
+        raise _origin_forbidden()
+
+    singular_value = query.get("draftDomain")
+    if singular_value is not None and type(singular_value) is not str:
+        raise _origin_forbidden()
+    multi_value = None
+    if "draftDomain" in multi_query:
+        values = multi_query["draftDomain"]
+        if (
+            not isinstance(values, list)
+            or len(values) != 1
+            or type(values[0]) is not str
+        ):
+            raise _origin_forbidden()
+        multi_value = values[0]
+    if singular_value is not None and multi_value is not None and singular_value != multi_value:
+        raise _origin_forbidden()
+    selected = singular_value if singular_value is not None else multi_value
+    return {} if selected is None else {"draftDomain": selected}
 
 
 def _origin_forbidden() -> HttpError:
