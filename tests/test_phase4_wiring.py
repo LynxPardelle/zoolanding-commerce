@@ -620,6 +620,7 @@ class SubscriptionIntegrationsWiringTests(unittest.TestCase):
         self.assertEqual(set(response_body(response)["data"]), {
             "commandId", "status", "redirectUrl", "expiresAt"
         })
+        self.assertEqual(response["headers"]["Cache-Control"], "no-store")
         call = gateway.execute.call_args
         self.assertEqual(call.args[0], "openPortal")
         self.assertEqual(call.args[2], {"subscriptionId": "subscription-1"})

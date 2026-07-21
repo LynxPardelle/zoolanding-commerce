@@ -14,6 +14,7 @@ from .auth_admin import AuthenticationError, AuthorizationError
 from .published_policy import PolicyResolutionError, ResolvedPolicies
 
 try:  # Lambda packages src/ at the import root.
+    from domain.limits import MAX_COMMAND_INTEGER
     from storage import (
         CommerceScope,
         StorageConflict,
@@ -22,6 +23,7 @@ try:  # Lambda packages src/ at the import root.
         StorageOutcomeUnknown,
     )
 except ModuleNotFoundError:  # Repository-root tests import src.*.
+    from src.domain.limits import MAX_COMMAND_INTEGER
     from src.storage import (
         CommerceScope,
         StorageConflict,
@@ -156,13 +158,21 @@ def safe_id(value: Any) -> str:
 
 
 def positive_int(value: Any) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or not 1 <= value <= MAX_COMMAND_INTEGER
+    ):
         raise validation_error()
     return value
 
 
 def nonnegative_int(value: Any) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or not 0 <= value <= MAX_COMMAND_INTEGER
+    ):
         raise validation_error()
     return value
 

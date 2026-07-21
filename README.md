@@ -2,7 +2,7 @@
 
 Generic server-only commercial state for draft-configured catalogs, immutable offers, inventory, orders, subscriptions, fulfillment, migration requests, and isolated manual fiscal requests.
 
-Phase 3 is implemented locally and remains undeployed. It includes the immutable policy resolver, retained storage, provider-neutral domain rules, conditional inventory transactions, eight literal browser routes, normalized integration-event consumption, an idempotent notification outbox, subscription projections, reservation reconciliation, and isolated manual fiscal intake. There is no AWS `dev` environment. Test and production deployment remain closed until their external identities, alarms, quotas, cross-service dependencies, and live gates are reviewed and explicitly approved.
+Phase 3 and the local TASK-040 Commerce gateway wiring are implemented and remain undeployed. They include the immutable policy resolver, retained storage, provider-neutral domain rules, conditional inventory transactions, eight literal browser routes, exact AWS_IAM Integrations commands/status lookup, normalized integration-event consumption, an idempotent notification outbox, subscription projections, reservation reconciliation, and isolated manual fiscal intake. There is no AWS `dev` environment. Test and production deployment remain closed until their external identities, alarms, quotas, cross-service dependencies, and live gates are reviewed and explicitly approved.
 
 ## Boundaries
 
@@ -24,7 +24,7 @@ Phase 3 is implemented locally and remains undeployed. It includes the immutable
 - fail closed on missing, oversized, malformed, duplicate-key, prefix-confusable, scope-mismatched, or contract-invalid input;
 - require a server-owned transport approval on an active production notification policy.
 
-The resolver never loads credentials or provider payloads. Public catalog reads resolve only Commerce policy. Prices are resolved from stored active OfferVersions, not accepted from the browser, and no Phase 3 handler calls Stripe.
+The resolver never loads credentials or provider payloads. Public catalog reads resolve only Commerce policy. Prices are resolved from stored active OfferVersions, not accepted from the browser, and no Commerce handler calls Stripe directly; provider commands cross only the exact signed Integrations routes.
 
 ## Storage Foundation
 
@@ -36,7 +36,7 @@ The undeployed SAM template owns three draft-scoped storage boundaries:
 
 All three use on-demand billing, server-side encryption, point-in-time recovery, retained replacement/deletion policy, and server-owned `pk`/`sk` keys. Catalog and Operations enable `expiresAt` TTL for eligible cleanup records only; Fiscal has no TTL until its approved retention policy exists. Only Operations enables a `NEW_IMAGE` DynamoDB Stream. Catalog has one sparse `KEYS_ONLY` `ReservationDueIndex`; the reconciler queries it and strongly rereads each base marker.
 
-The undeployed template also defines the Commerce notification-request topic, the Integration Events queue and DLQ, and a distinct outbox-stream failure queue. The SQS consumer and DynamoDB Stream relay report partial batch failures. The stream mapping accepts only pending Commerce Outbox records. The five-minute reconciliation schedule is defined but disabled until `TASK-040` supplies the canonical provider-status gateway and an approved deployment explicitly enables it.
+The undeployed template also defines the Commerce notification-request topic, the Integration Events queue and DLQ, and a distinct outbox-stream failure queue. The SQS consumer and DynamoDB Stream relay report partial batch failures. The stream mapping accepts only pending Commerce Outbox records. TASK-040 now supplies the canonical provider-status gateway. The five-minute reconciliation schedule remains disabled until an approved deployment supplies the reviewed environment-specific `IntegrationsApiId`, verifies the cross-service route/IAM contract, and explicitly enables the schedule.
 
 ## Domain Foundation
 
@@ -53,7 +53,7 @@ The pure `src/domain/` modules keep the first code-owned invariants independent 
 
 Every money value requires the owning provider/policy currency allowlist and fails closed when the selected code is absent. This layer deliberately does not add a stale ISO registry or silently normalize browser input. Customer-facing discount code casing remains part of the immutable restriction fingerprint; TASK-041 will derive a separate case-folded lookup key to enforce active-code uniqueness. Data Spaces references contain identifiers only: the future authorized activation handler must derive environment/tenant/draft/domain from trusted policy, obtain and validate the allowlisted internal snapshot, and persist that snapshot before an offer becomes buyable. Constructors support trusted rehydration; future mutation handlers must load current server state, enforce bounded request/cardinality/provider limits, and apply revision/transition helpers with conditional persistence rather than accepting browser lifecycle values.
 
-Subscription commands remain provider-neutral and fail closed until the exact `TASK-040` AWS_IAM command gateway exists. Fiscal PII is accepted only by the isolated fiscal routes/table after opt-in and live-gate checks; it is not written to drafts, Data Spaces, events, logs, or general Commerce projections. Data Spaces activation snapshots, Stripe mappings/calls, and every AWS deployment remain later work.
+Subscription commands remain provider-neutral and use the exact TASK-040 AWS_IAM command gateway, including bounded subscription changes, discounts, pause policy, and fresh Customer Portal handoffs. The gateway is local-only until an approved deployment supplies `IntegrationsApiId`; it never accepts provider credentials or account identifiers from the browser. Fiscal PII is accepted only by the isolated fiscal routes/table after opt-in and live-gate checks; it is not written to drafts, Data Spaces, events, logs, or general Commerce projections. Data Spaces activation snapshots, Stripe mappings/calls inside Integrations, and every AWS deployment remain later work.
 
 ## Inventory Transactions
 
@@ -69,7 +69,7 @@ Subscription commands remain provider-neutral and fail closed until the exact `T
 - uncertain due reservations move their draft-scoped marker forward by exactly five minutes, so one unresolved item cannot indefinitely hide later items; no scan or TTL acts as a commercial timer;
 - environment, tenant, and draft prefix every key, and the short DynamoDB client token is derived from both that scope and the exact transaction plan.
 
-The reconciler never treats unavailable or ambiguous provider evidence as permission to release stock. `TASK-040` still owns the exact internal provider-status call and evidence adapter; until then, the schedule is disabled. No Phase 3 code contains a provider credential, customer identity document, raw provider payload, or public provider URL.
+The reconciler never treats unavailable or ambiguous provider evidence as permission to release stock. TASK-040 now provides the exact internal provider-status call and evidence adapter, while the schedule stays disabled until the reviewed `IntegrationsApiId` and explicit deployment enablement are present. No Commerce code contains a provider credential, customer identity document, raw provider payload, or persisted public provider URL.
 
 ## Server Boundaries
 
@@ -79,7 +79,7 @@ The API uses separate literal POST routes instead of a body-selected IAM router:
 - `/features/commerce/read` is protected by `commerce:catalog:read`;
 - `/features/commerce/catalog/action` is protected by `commerce:catalog:write`, CSRF, conditional revisions, and a durable 90-day Operations idempotency receipt;
 - `/features/commerce/inventory/action` is protected by `commerce:inventory:write` and uses the policy-owned stock location;
-- `/features/commerce/subscription/action` is protected by `commerce:subscription:manage` and remains unavailable until its provider command is wired;
+- `/features/commerce/subscription/action` is protected by `commerce:subscription:manage` and calls only the exact signed TASK-040 subscription and Customer Portal routes;
 - `/features/commerce/public-action` admits bounded Checkout requests using server-resolved scope, time, IDs, location, prices, the draft's closed currency allowlist, and a same-version notification target. Its `Idempotency-Key` is a recovery capability: the draft runtime must generate exactly 32 cryptographically random bytes, encode them as canonical unpadded base64url, keep the raw value out of logs/storage, and reuse it only for the exact lost-response retry;
 - `/features/commerce/fiscal/request` accepts a same-origin, single-use order-access proof only after verified payment state makes it eligible;
 - `/features/commerce/fiscal/admin` uses the distinct `commerce:fiscal:manage` capability and Fiscal-only PII access.

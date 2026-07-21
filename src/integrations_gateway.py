@@ -7,6 +7,7 @@ import json
 import os
 import re
 import socket
+import time
 from types import MappingProxyType
 from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
@@ -14,9 +15,11 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 try:
+    from domain.limits import MAX_COMMAND_INTEGER
     from domain.offers import DiscountVersion, OfferVersion
     from storage import CommerceScope
 except ModuleNotFoundError:
+    from src.domain.limits import MAX_COMMAND_INTEGER
     from src.domain.offers import DiscountVersion, OfferVersion
     from src.storage import CommerceScope
 
@@ -350,16 +353,22 @@ class InternalIntegrationsGateway:
         path, identity_operation = selected
         input_copy = _plain_mapping(command_input)
         if operation == "openPortal":
+            if set(input_copy) != {"subscriptionId"}:
+                raise ValueError("customer portal command is invalid")
+            portal_input = {
+                "subscriptionId": _safe_id(input_copy["subscriptionId"]),
+                "portalAttemptId": _portal_attempt_id(scope, idempotency_key),
+            }
             technical_key = _derived_idempotency(
                 scope,
                 connection_id,
                 identity_operation,
-                input_copy.get("subscriptionId"),
+                portal_input["subscriptionId"],
                 1,
-                hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest(),
+                canonical_hash(portal_input),
             )
             payload = _command_envelope(
-                scope, connection_id, input_copy, idempotency_key=technical_key
+                scope, connection_id, portal_input, idempotency_key=technical_key
             )
         else:
             payload = self._operation_command(
@@ -552,6 +561,7 @@ def _validated_redirect_result(
         or value.get("status") != "accepted"
         or type(value.get("expiresAt")) is not int
         or value["expiresAt"] <= 0
+        or (redirect_kind == "portal" and value["expiresAt"] <= int(time.time()))
     ):
         raise IntegrationsUnavailable("Integrations service is unavailable")
     try:
@@ -593,9 +603,23 @@ def _safe_id(value: Any) -> str:
 
 
 def _positive_int(value: Any) -> int:
-    if type(value) is not int or value <= 0:
+    if type(value) is not int or not 1 <= value <= MAX_COMMAND_INTEGER:
         raise ValueError("command revision is invalid")
     return value
+
+
+def _portal_attempt_id(scope: CommerceScope, browser_idempotency_key: Any) -> str:
+    if (
+        type(browser_idempotency_key) is not str
+        or not 1 <= len(browser_idempotency_key) <= 256
+        or any(ord(character) < 32 for character in browser_idempotency_key)
+    ):
+        raise ValueError("command idempotency is invalid")
+    digest = canonical_hash({
+        "scope": _scope_fields(scope),
+        "idempotencyKey": browser_idempotency_key,
+    })
+    return f"portal-{digest[:56]}"
 
 
 def _plain_mapping(value: Mapping[str, Any]) -> dict[str, Any]:

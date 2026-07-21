@@ -73,6 +73,62 @@ class DomainTests(unittest.TestCase):
             with self.subTest(allowlist=invalid_allowlist), self.assertRaises(ValueError):
                 offers.Money(0, "MXN", invalid_allowlist)
 
+    def test_money_matches_the_integrations_minor_unit_boundary(self):
+        boundary = offers.Money(99_999_999, "MXN", SUPPORTED_CURRENCIES)
+
+        self.assertEqual(boundary.amount_minor, 99_999_999)
+        with self.assertRaises(ValueError):
+            offers.Money(100_000_000, "MXN", SUPPORTED_CURRENCIES)
+
+    def test_commercial_revisions_match_the_integrations_integer_boundary(self):
+        maximum = 9_999_999_999
+
+        self.assertEqual(offer_version(revision=maximum).revision, maximum)
+        self.assertEqual(discount_version(redeem_by_epoch=maximum).redeem_by_epoch, maximum)
+        for call in (
+            lambda: offer_version(revision=maximum + 1),
+            lambda: offer_version(lifecycle_revision=maximum + 1),
+            lambda: offer_version(presentation_revision=maximum + 1),
+            lambda: discount_version(revision=maximum + 1),
+            lambda: discount_version(lifecycle_revision=maximum + 1),
+            lambda: discount_version(presentation_revision=maximum + 1),
+            lambda: discount_version(redeem_by_epoch=maximum + 1),
+        ):
+            with self.subTest(call=call), self.assertRaises(ValueError):
+                call()
+
+    def test_discount_limits_match_the_integrations_provider_contract(self):
+        duration_boundary = discount_version(
+            duration="repeating",
+            duration_in_months=36,
+        )
+        redemption_boundary = discount_version(redemption_limit=1_000_000)
+
+        self.assertEqual(duration_boundary.duration_in_months, 36)
+        self.assertEqual(redemption_boundary.redemption_limit, 1_000_000)
+        for call in (
+            lambda: discount_version(duration="repeating", duration_in_months=37),
+            lambda: discount_version(redemption_limit=1_000_001),
+        ):
+            with self.subTest(call=call), self.assertRaises(ValueError):
+                call()
+
+    def test_provider_presentation_is_bounded_plain_text_without_domains_or_bidi(self):
+        boundary = offer_version(display_name="N" * 160)
+
+        self.assertEqual(len(boundary.display_name), 160)
+        for unsafe in (
+            "N" * 161,
+            "example.com",
+            "plans.example.com.mx",
+            "support@example.com",
+            "safe\u2066text",
+            "safe\u202etext",
+            "bad\r\nheader",
+        ):
+            with self.subTest(unsafe=unsafe), self.assertRaises(ValueError):
+                offer_version(display_name=unsafe)
+
     def test_catalog_inventory_shipping_and_fiscal_values_fail_closed(self):
         self.assertEqual(catalog.validate_sellable_type("service"), "service")
         self.assertEqual(inventory.validate_quantity(0), 0)

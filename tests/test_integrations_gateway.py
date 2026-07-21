@@ -1,4 +1,3 @@
-import hashlib
 import importlib.util
 import json
 import socket
@@ -423,7 +422,11 @@ class IntegrationsGatewayContractTests(unittest.TestCase):
         self.assertEqual(portal["status"], "accepted")
         self.assertEqual(portal_transport.calls[0][:2], ("POST", "/internal/v1/stripe/customer-portal"))
         portal_payload = portal_transport.calls[0][2]
-        source_hash = hashlib.sha256(b"browser-key").hexdigest()
+        portal_input = portal_payload["input"]
+        self.assertEqual(set(portal_input), {"subscriptionId", "portalAttemptId"})
+        self.assertEqual(portal_input["subscriptionId"], "subscription-1")
+        self.assertRegex(portal_input["portalAttemptId"], r"^portal-[a-f0-9]{56}$")
+        content_hash = canonical_hash(portal_input)
         self.assertEqual(
             portal_payload["idempotencyKey"],
             "integrations-command-v1:" + canonical_hash({
@@ -432,10 +435,90 @@ class IntegrationsGatewayContractTests(unittest.TestCase):
                 "operation": "customer-portal",
                 "resourceId": "subscription-1",
                 "revision": 1,
-                "contentHash": source_hash,
+                "contentHash": content_hash,
             }),
         )
         self.assertNotIn("browser-key", repr(portal_payload))
+
+        InternalIntegrationsGateway(portal_transport).execute_subscription(
+            "openPortal",
+            SCOPE,
+            CONNECTION_ID,
+            {"subscriptionId": "subscription-1"},
+            idempotency_key="browser-key",
+        )
+        replay_payload = portal_transport.calls[1][2]
+        self.assertEqual(replay_payload, portal_payload)
+
+        InternalIntegrationsGateway(portal_transport).execute_subscription(
+            "openPortal",
+            SCOPE,
+            CONNECTION_ID,
+            {"subscriptionId": "subscription-1"},
+            idempotency_key="new-browser-key",
+        )
+        new_attempt_payload = portal_transport.calls[2][2]
+        self.assertNotEqual(
+            new_attempt_payload["input"]["portalAttemptId"],
+            portal_input["portalAttemptId"],
+        )
+        self.assertNotEqual(new_attempt_payload["commandId"], portal_payload["commandId"])
+        self.assertNotIn("new-browser-key", repr(new_attempt_payload))
+
+        other_scope = CommerceScope("test", "tenant-a", "draft-b", "example.com")
+        InternalIntegrationsGateway(portal_transport).execute_subscription(
+            "openPortal",
+            other_scope,
+            CONNECTION_ID,
+            {"subscriptionId": "subscription-1"},
+            idempotency_key="browser-key",
+        )
+        self.assertNotEqual(
+            portal_transport.calls[3][2]["input"]["portalAttemptId"],
+            portal_input["portalAttemptId"],
+        )
+
+    def test_portal_redirect_rejects_expired_or_wrong_host_handoffs(self):
+        from src.integrations_gateway import InternalIntegrationsGateway, IntegrationsUnavailable
+
+        for redirect_url, expires_at in (
+            ("https://billing.stripe.com/p/session/expired", 1),
+            ("https://billing.stripe.com.evil.example/p/session", 1_900_000_000),
+        ):
+            with self.subTest(redirect_url=redirect_url):
+                transport = RecordingTransport(lambda payload: {
+                    "commandId": payload["commandId"],
+                    "status": "accepted",
+                    "redirectUrl": redirect_url,
+                    "expiresAt": expires_at,
+                })
+                with self.assertRaises(IntegrationsUnavailable):
+                    InternalIntegrationsGateway(transport).execute_subscription(
+                        "openPortal",
+                        SCOPE,
+                        CONNECTION_ID,
+                        {"subscriptionId": "subscription-1"},
+                        idempotency_key="browser-key",
+                    )
+
+    def test_gateway_rejects_integer_overflow_before_transport(self):
+        from src.integrations_gateway import InternalIntegrationsGateway
+
+        transport = RecordingTransport({
+            "orderId": "order-1",
+            "paymentAttemptId": "attempt-1",
+            "revision": 10_000_000_000,
+            "status": "pending",
+        })
+        with self.assertRaises(ValueError):
+            InternalIntegrationsGateway(transport).lookup_status(
+                SCOPE,
+                CONNECTION_ID,
+                "order-1",
+                "attempt-1",
+                10_000_000_000,
+            )
+        self.assertEqual(transport.calls, [])
 
 
 if __name__ == "__main__":

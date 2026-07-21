@@ -8,6 +8,11 @@ import unicodedata
 
 from .catalog import validate_sellable_type
 from .fiscal import TAX_BEHAVIORS
+from .limits import (
+    MAX_AMOUNT_MINOR,
+    bounded_nonnegative_integer,
+    bounded_positive_integer,
+)
 from .subscriptions import validate_recurring_sellable_type
 
 
@@ -26,8 +31,9 @@ _RECURRENCE_INTERVALS = frozenset({"month", "year"})
 _DISCOUNT_DURATIONS = frozenset({"once", "forever", "repeating"})
 _SAFE_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}", re.ASCII)
 _SAFE_CUSTOMER_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", re.ASCII)
-_URI_TOKEN = re.compile(
-    r"(?:\b[A-Za-z][A-Za-z0-9+.-]{0,31}:(?=\S)|\bwww\.)",
+_URL_LIKE = re.compile(
+    r"(?:\b[A-Za-z][A-Za-z0-9+.-]{0,31}:(?=\S)|www\.|"
+    r"\b(?:[a-z0-9-]+\.)+[a-z]{2,63}(?:[/?:#]\S*)?)",
     re.IGNORECASE | re.ASCII,
 )
 
@@ -39,8 +45,11 @@ class Money:
     supported_currencies: frozenset[str] = field(repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if type(self.amount_minor) is not int or self.amount_minor < 0:
-            raise ValueError("amount_minor must be a non-negative integer")
+        bounded_nonnegative_integer(
+            self.amount_minor,
+            "amount_minor",
+            maximum=MAX_AMOUNT_MINOR,
+        )
         if not isinstance(self.currency, str) or re.fullmatch(r"[A-Z]{3}", self.currency, re.ASCII) is None:
             raise ValueError("currency must be a canonical three-letter code")
         if type(self.supported_currencies) is not frozenset or not self.supported_currencies:
@@ -63,17 +72,13 @@ def _validate_safe_id(value: object, field_name: str, *, optional: bool = False)
 
 
 def _validate_positive_revision(value: object, field_name: str) -> int:
-    if type(value) is not int or value <= 0:
-        raise ValueError(f"{field_name} must be a positive integer")
-    return value
+    return bounded_positive_integer(value, field_name)
 
 
 def _validate_optional_positive_integer(value: object, field_name: str) -> int | None:
     if value is None:
         return None
-    if type(value) is not int or value <= 0:
-        raise ValueError(f"{field_name} must be a positive integer when present")
-    return value
+    return bounded_positive_integer(value, field_name)
 
 
 def _validate_lifecycle(state: object, revision: object) -> None:
@@ -95,7 +100,7 @@ def _validate_display(value: object, field_name: str, maximum_length: int) -> st
         for character in value
     ):
         raise ValueError(f"{field_name} contains control characters")
-    if "<" in value or ">" in value or _URI_TOKEN.search(value) is not None:
+    if "<" in value or ">" in value or _URL_LIKE.search(value) is not None:
         raise ValueError(f"{field_name} must be plain display text without URLs")
     return value
 
@@ -176,7 +181,7 @@ class OfferVersion:
             validate_recurring_sellable_type(self.sellable_type)
         _validate_lifecycle(self.lifecycle_state, self.lifecycle_revision)
         _validate_positive_revision(self.presentation_revision, "presentation_revision")
-        _validate_display(self.display_name, "display_name", 200)
+        _validate_display(self.display_name, "display_name", 160)
         _validate_display(self.display_description, "display_description", 1_000)
 
     @property
@@ -280,6 +285,8 @@ class DiscountVersion:
             )
             if self.duration_in_months is None:
                 raise ValueError("repeating discounts require duration_in_months")
+            if self.duration_in_months > 36:
+                raise ValueError("duration_in_months exceeds the provider limit")
         elif self.duration_in_months is not None:
             raise ValueError("duration_in_months is only valid for repeating discounts")
         if type(self.eligible_offer_version_ids) is not frozenset:
@@ -293,6 +300,8 @@ class DiscountVersion:
         if any(type(value) is not str for value in self.eligible_offer_version_ids):
             raise ValueError("eligible_offer_version_ids contains an unsafe identifier")
         _validate_optional_positive_integer(self.redemption_limit, "redemption_limit")
+        if self.redemption_limit is not None and self.redemption_limit > 1_000_000:
+            raise ValueError("redemption_limit exceeds the provider limit")
         _validate_optional_positive_integer(self.redeem_by_epoch, "redeem_by_epoch")
         if self.customer_facing_code is not None and (
             type(self.customer_facing_code) is not str
@@ -301,7 +310,7 @@ class DiscountVersion:
             raise ValueError("customer_facing_code must be a safe ASCII identifier")
         _validate_lifecycle(self.lifecycle_state, self.lifecycle_revision)
         _validate_positive_revision(self.presentation_revision, "presentation_revision")
-        _validate_display(self.display_name, "display_name", 200)
+        _validate_display(self.display_name, "display_name", 160)
         _validate_display(self.display_description, "display_description", 1_000)
 
     @property

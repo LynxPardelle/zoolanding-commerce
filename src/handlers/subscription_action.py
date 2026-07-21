@@ -231,7 +231,7 @@ def _validated_gateway_result(value: Any, operation: str) -> dict[str, Any]:
             or redirect.username is not None
             or redirect.password is not None
             or type(value.get("expiresAt")) is not int
-            or value["expiresAt"] <= 0
+            or value["expiresAt"] <= int(time.time())
         ):
             raise _unavailable()
         return {
