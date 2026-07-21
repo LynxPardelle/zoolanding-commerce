@@ -73,6 +73,10 @@ except ModuleNotFoundError:
 
 PATH = "/features/commerce/public-action"
 OWNED_TEST_PREVIEW_ORIGIN = "https://test.zoolandingpage.com.mx"
+_NOTIFICATION_TYPE_TEMPLATES = {
+    "payment-failed": "payment-failed-v1",
+    "payment-succeeded": "payment-succeeded-v1",
+}
 
 
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
@@ -389,6 +393,22 @@ def _notification_target(policies: Any, commerce: dict[str, Any]) -> dict[str, A
     policy = matches[0]
     if policy.get("status") == "disabled":
         return None
+    notification_types = policy.get("notificationTypes")
+    template_ids = policy.get("templateIds")
+    if (
+        not isinstance(notification_types, list)
+        or not isinstance(template_ids, list)
+        or not 1 <= len(notification_types) <= len(_NOTIFICATION_TYPE_TEMPLATES)
+        or len(set(notification_types)) != len(notification_types)
+        or any(value not in _NOTIFICATION_TYPE_TEMPLATES for value in notification_types)
+    ):
+        raise policy_unavailable()
+    type_templates = {
+        value: _NOTIFICATION_TYPE_TEMPLATES[value]
+        for value in sorted(notification_types)
+    }
+    if len(template_ids) != len(type_templates) or set(template_ids) != set(type_templates.values()):
+        raise policy_unavailable()
     recipient_sets = policy.get("recipientSets")
     if not isinstance(recipient_sets, list) or len(recipient_sets) != 1:
         raise policy_unavailable()
@@ -398,10 +418,12 @@ def _notification_target(policies: Any, commerce: dict[str, Any]) -> dict[str, A
         raise policy_unavailable()
     try:
         return {
+            "notificationPolicyId": safe_id(policy.get("id")),
             "publishedVersionId": policies.version_id,
             "recipientSetId": safe_id(recipient_set.get("id")),
             "recipientSetVersion": positive_int(recipient_set.get("version")),
             "recipientMemberId": safe_id(members[0].get("id")),
+            "notificationTypeTemplates": type_templates,
         }
     except Exception:
         raise policy_unavailable() from None

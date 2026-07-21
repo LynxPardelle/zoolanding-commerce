@@ -281,10 +281,15 @@ class CommerceStorageTests(unittest.TestCase):
         result = self.reserve(
             order,
             notification_target={
+                "notificationPolicyId": "payment-status",
                 "publishedVersionId": "version-1",
                 "recipientSetId": "billing-operators",
                 "recipientSetVersion": 1,
                 "recipientMemberId": "primary",
+                "notificationTypeTemplates": {
+                    "payment-failed": "payment-failed-v1",
+                    "payment-succeeded": "payment-succeeded-v1",
+                },
             },
         )
 
@@ -301,6 +306,7 @@ class CommerceStorageTests(unittest.TestCase):
         self.assertIn("ReservationDue", item_types)
         order_item = next(operation["item"] for operation in operations if operation.get("item", {}).get("itemType") == "Order")
         self.assertEqual(order_item["paymentAttemptId"], "attempt-1")
+        self.assertEqual(order_item["notificationTarget"]["notificationPolicyId"], "payment-status")
         self.assertEqual(order_item["notificationTarget"]["publishedVersionId"], "version-1")
         self.assertNotIn("expiresAt", order_item)
         self.assertNotIn("provider", repr(operations).lower())
@@ -318,15 +324,26 @@ class CommerceStorageTests(unittest.TestCase):
 
     def test_reserve_rejects_untrusted_notification_target_fields_before_writing(self):
         target = {
+            "notificationPolicyId": "payment-status",
             "publishedVersionId": "version-1",
             "recipientSetId": "billing-operators",
             "recipientSetVersion": 1,
             "recipientMemberId": "primary",
+            "notificationTypeTemplates": {
+                "payment-failed": "payment-failed-v1",
+                "payment-succeeded": "payment-succeeded-v1",
+            },
         }
         invalid_targets = (
+            {key: value for key, value in target.items() if key != "notificationPolicyId"},
+            {key: value for key, value in target.items() if key != "notificationTypeTemplates"},
             {**target, "email": "attacker@example.test"},
             {**target, "recipientSetVersion": 0},
             {**target, "recipientSetVersion": True},
+            {**target, "notificationPolicyId": "INVALID"},
+            {**target, "notificationTypeTemplates": {}},
+            {**target, "notificationTypeTemplates": {"payment-succeeded": "payment-failed-v1"}},
+            {**target, "notificationTypeTemplates": {"custom": "custom-v1"}},
         )
 
         for notification_target in invalid_targets:
@@ -335,6 +352,31 @@ class CommerceStorageTests(unittest.TestCase):
 
         self.assertEqual(self.backend.transactions, [])
         self.assertEqual(self.backend.items, {})
+
+    def test_checkout_idempotency_binds_the_exact_notification_policy_target(self):
+        self.seed_stock("landing", on_hand=10)
+        target = {
+            "notificationPolicyId": "payment-status",
+            "publishedVersionId": "version-1",
+            "recipientSetId": "billing-operators",
+            "recipientSetVersion": 1,
+            "recipientMemberId": "primary",
+            "notificationTypeTemplates": {
+                "payment-failed": "payment-failed-v1",
+                "payment-succeeded": "payment-succeeded-v1",
+            },
+        }
+
+        self.reserve(notification_target=target)
+
+        with self.assertRaises(StorageConflict):
+            self.reserve(notification_target={**target, "notificationPolicyId": "other-policy"})
+        with self.assertRaises(StorageConflict):
+            self.reserve(notification_target={
+                **target,
+                "notificationTypeTemplates": {"payment-succeeded": "payment-succeeded-v1"},
+            })
+        self.assertEqual(len(self.backend.transactions), 1)
 
     def test_due_reservation_can_be_deferred_without_starving_the_next_item(self):
         self.seed_stock("first", on_hand=2)

@@ -93,10 +93,15 @@ class ReconciliationTests(unittest.TestCase):
             actor_hash=None,
             now_epoch=CREATED_AT,
             notification_target={
+                "notificationPolicyId": "payment-status",
                 "publishedVersionId": "version-1",
                 "recipientSetId": "billing-operators",
                 "recipientSetVersion": 1,
                 "recipientMemberId": "primary",
+                "notificationTypeTemplates": {
+                    "payment-failed": "payment-failed-v1",
+                    "payment-succeeded": "payment-succeeded-v1",
+                },
             },
         )
 
@@ -126,6 +131,12 @@ class ReconciliationTests(unittest.TestCase):
             table == OPERATIONS_TABLE and item.get("itemType") == "Outbox"
             for (table, _pk, _sk), item in self.backend.items.items()
         ))
+        outbox = next(
+            item
+            for (table, _pk, _sk), item in self.backend.items.items()
+            if table == OPERATIONS_TABLE and item.get("itemType") == "Outbox"
+        )
+        self.assertEqual(outbox["payload"]["notificationPolicyId"], "payment-status")
 
         other = ReconciliationTests(methodName="runTest")
         other.setUp()
@@ -133,6 +144,22 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(released["released"], 1)
         stock = other.backend.get(CATALOG_TABLE, SCOPE.partition_key, "STOCK#primary#landing")
         self.assertEqual((stock["onHand"], stock["reserved"]), (10, 0))
+
+    def test_missing_notification_policy_id_fails_closed_without_terminal_mutation(self):
+        order_key = (OPERATIONS_TABLE, SCOPE.partition_key, "ORDER#order-1")
+        self.backend.items[order_key]["notificationTarget"].pop("notificationPolicyId")
+
+        result, _policy, _statuses = self.reconcile("paid")
+
+        self.assertEqual(
+            result,
+            {"processed": 0, "committed": 0, "released": 0, "deferred": 1, "failed": 1},
+        )
+        self.assertEqual(self.backend.items[order_key]["status"], "pending_checkout")
+        self.assertFalse(any(
+            table == OPERATIONS_TABLE and item.get("itemType") == "Outbox"
+            for (table, _pk, _sk), item in self.backend.items.items()
+        ))
 
     def test_unknown_unavailable_or_missing_adapter_defers_exactly_five_minutes(self):
         cases = (

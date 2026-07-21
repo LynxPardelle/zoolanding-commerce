@@ -44,6 +44,10 @@ _DOMAIN = re.compile(
     re.ASCII,
 )
 _VERSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", re.ASCII)
+_NOTIFICATION_TYPE_TEMPLATES = {
+    "payment-failed": "payment-failed-v1",
+    "payment-succeeded": "payment-succeeded-v1",
+}
 
 
 class StorageError(RuntimeError):
@@ -1565,15 +1569,10 @@ class CommerceStore:
             notification_type, template_id = "payment-succeeded", "payment-succeeded-v1"
         else:
             notification_type, template_id = "payment-failed", "payment-failed-v1"
-        outbox_event_id = _hash_json(
-            {
-                "scope": _scope_fields(scope),
-                "sourceEventId": event_id,
-                "eventType": "notification.requested.v1",
-                "target": target,
-            }
-        )
+        if target["notificationTypeTemplates"].get(notification_type) != template_id:
+            return [inbox]
         payload = {
+            "notificationPolicyId": target["notificationPolicyId"],
             "notificationType": notification_type,
             "publishedVersionId": target["publishedVersionId"],
             "templateId": template_id,
@@ -1584,13 +1583,14 @@ class CommerceStore:
                 "type": "commerce-order",
                 "id": _safe_id(order.get("orderId"), "order_id"),
             },
-            "dedupeKey": outbox_event_id,
             "variables": {
                 "orderId": {"type": "safe-id", "value": order["orderId"]},
                 "amountMinor": {"type": "integer", "value": order["amountMinor"]},
                 "currency": {"type": "currency", "value": order["currency"]},
             },
         }
+        outbox_event_id = _notification_event_id(scope, event_id, payload)
+        payload["dedupeKey"] = outbox_event_id
         return [
             inbox,
             self._put(
@@ -2055,24 +2055,42 @@ def _notification_target(value: object) -> dict[str, Any] | None:
     if value is None:
         return None
     keys = {
+        "notificationPolicyId",
         "publishedVersionId",
         "recipientSetId",
         "recipientSetVersion",
         "recipientMemberId",
+        "notificationTypeTemplates",
     }
     if not isinstance(value, Mapping) or set(value) != keys:
         raise ValueError("notification_target is invalid")
     version_id = value.get("publishedVersionId")
     version = value.get("recipientSetVersion")
+    type_templates = value.get("notificationTypeTemplates")
     if type(version_id) is not str or _VERSION_ID.fullmatch(version_id) is None:
         raise ValueError("notification_target is invalid")
     if type(version) is not int or not 1 <= version <= 2_147_483_647:
         raise ValueError("notification_target is invalid")
+    if (
+        not isinstance(type_templates, Mapping)
+        or not 1 <= len(type_templates) <= len(_NOTIFICATION_TYPE_TEMPLATES)
+        or any(
+            key not in _NOTIFICATION_TYPE_TEMPLATES
+            or type(template_id) is not str
+            or template_id != _NOTIFICATION_TYPE_TEMPLATES[key]
+            for key, template_id in type_templates.items()
+        )
+    ):
+        raise ValueError("notification_target is invalid")
     return {
+        "notificationPolicyId": _safe_id(value.get("notificationPolicyId"), "notification_policy_id"),
         "publishedVersionId": version_id,
         "recipientSetId": _safe_id(value.get("recipientSetId"), "recipient_set_id"),
         "recipientSetVersion": version,
         "recipientMemberId": _safe_id(value.get("recipientMemberId"), "recipient_member_id"),
+        "notificationTypeTemplates": {
+            key: type_templates[key] for key in sorted(type_templates)
+        },
     }
 
 
@@ -2351,6 +2369,7 @@ def _outbox(item: Any, scope: CommerceScope, event_id: str) -> dict[str, Any]:
             raise StorageConflict("outbox event is invalid")
     payload = item["payload"]
     expected_payload_keys = {
+        "notificationPolicyId",
         "notificationType",
         "publishedVersionId",
         "templateId",
@@ -2383,10 +2402,14 @@ def _outbox(item: Any, scope: CommerceScope, event_id: str) -> dict[str, Any]:
     try:
         target = _notification_target(
             {
+                "notificationPolicyId": payload.get("notificationPolicyId"),
                 "publishedVersionId": payload.get("publishedVersionId"),
                 "recipientSetId": payload.get("recipientSetId"),
                 "recipientSetVersion": payload.get("recipientSetVersion"),
                 "recipientMemberId": payload.get("recipientMemberId"),
+                "notificationTypeTemplates": {
+                    payload.get("notificationType"): payload.get("templateId"),
+                },
             }
         )
         order_id = _safe_id(source.get("id"), "order_id")
@@ -2397,16 +2420,6 @@ def _outbox(item: Any, scope: CommerceScope, event_id: str) -> dict[str, Any]:
         raise StorageConflict("outbox payload is invalid") from None
     if target is None:
         raise StorageConflict("outbox payload is invalid")
-    expected_event_id = _hash_json(
-        {
-            "scope": _scope_fields(scope),
-            "sourceEventId": source_event_id,
-            "eventType": "notification.requested.v1",
-            "target": target,
-        }
-    )
-    if event_id != expected_event_id:
-        raise StorageConflict("outbox event is invalid")
     order_variable = variables.get("orderId")
     amount_variable = variables.get("amountMinor")
     currency_variable = variables.get("currency")
@@ -2424,6 +2437,13 @@ def _outbox(item: Any, scope: CommerceScope, event_id: str) -> dict[str, Any]:
         or re.fullmatch(r"[A-Z]{3}", currency_variable["value"], re.ASCII) is None
     ):
         raise StorageConflict("outbox payload is invalid")
+    canonical_payload = {
+        key: copy.deepcopy(value)
+        for key, value in payload.items()
+        if key != "dedupeKey"
+    }
+    if event_id != _notification_event_id(scope, source_event_id, canonical_payload):
+        raise StorageConflict("outbox event is invalid")
     return copy.deepcopy(dict(item))
 
 
@@ -2495,6 +2515,19 @@ def _client_request_token(
             "operations": operations,
         }
     )[:36]
+
+
+def _notification_event_id(
+    scope: CommerceScope,
+    source_event_id: str,
+    payload: Mapping[str, Any],
+) -> str:
+    return _hash_json({
+        "scope": _scope_fields(_scope(scope)),
+        "sourceEventId": _safe_id(source_event_id, "source_event_id"),
+        "eventType": "notification.requested.v1",
+        "payload": payload,
+    })
 
 
 def _hash_json(value: Mapping[str, Any]) -> str:

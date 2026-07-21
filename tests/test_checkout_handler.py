@@ -188,10 +188,15 @@ class CheckoutHandlerContractTests(unittest.TestCase):
             f"public-checkout-recovery-v1:{PUBLIC_CHECKOUT_RECOVERY_KEY}",
         )
         self.assertEqual(kwargs["notification_target"], {
+            "notificationPolicyId": "payment-status",
             "publishedVersionId": "version-1",
             "recipientSetId": "billing-operators",
             "recipientSetVersion": 1,
             "recipientMemberId": "primary",
+            "notificationTypeTemplates": {
+                "payment-failed": "payment-failed-v1",
+                "payment-succeeded": "payment-succeeded-v1",
+            },
         })
         self.assertNotIn(PUBLIC_CHECKOUT_RECOVERY_KEY, response["body"])
         self.assertEqual(
@@ -205,6 +210,38 @@ class CheckoutHandlerContractTests(unittest.TestCase):
         )
         self.assertNotIn("reservation", response["body"].lower())
         self.assertNotIn("paymentattempt", response["body"].lower())
+
+    def test_notification_target_keeps_only_the_exact_configured_type_template_mapping(self):
+        from src.handlers import checkout
+
+        policies = resolved_policies()
+        policies.notification_policies.update({
+            "version": 1,
+            "scope": policies.scope,
+            "policies": [{
+                "id": "payment-status",
+                "status": "active",
+                "provider": "email.smtp",
+                "connectionId": "billing-mailbox",
+                "notificationTypes": ["payment-succeeded"],
+                "templateIds": ["payment-succeeded-v1"],
+                "recipientSets": [{
+                    "id": "billing-operators", "version": 1, "members": [{"id": "primary"}],
+                }],
+                "retryPolicy": {"maxAttempts": 5},
+                "acceptanceStatus": "accepted_by_smtp",
+            }],
+        })
+
+        target = checkout._notification_target(
+            policies,
+            {"notificationPolicyIds": ["payment-status"]},
+        )
+
+        self.assertEqual(
+            target["notificationTypeTemplates"],
+            {"payment-succeeded": "payment-succeeded-v1"},
+        )
 
     def test_physical_stock_target_is_server_derived(self):
         from src.handlers import checkout
@@ -438,6 +475,20 @@ class CheckoutHandlerContractTests(unittest.TestCase):
             {
                 "operation": "admitCheckout",
                 "input": {"lines": [{"offerVersionId": "offer-1", "quantity": 1}], "locationId": "other"},
+            },
+            {
+                "operation": "admitCheckout",
+                "input": {
+                    "lines": [{"offerVersionId": "offer-1", "quantity": 1}],
+                    "notificationPolicyId": "forged-policy",
+                },
+            },
+            {
+                "operation": "admitCheckout",
+                "input": {
+                    "lines": [{"offerVersionId": "offer-1", "quantity": 1}],
+                    "recipientMemberId": "forged-recipient",
+                },
             },
         )
         for payload in forbidden_payloads:

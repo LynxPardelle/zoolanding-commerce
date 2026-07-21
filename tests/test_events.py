@@ -113,10 +113,15 @@ class CommerceEventTests(unittest.TestCase):
             actor_hash=None,
             now_epoch=NOW,
             notification_target={
+                "notificationPolicyId": "payment-status",
                 "publishedVersionId": "version-1",
                 "recipientSetId": "billing-operators",
                 "recipientSetVersion": 1,
                 "recipientMemberId": "primary",
+                "notificationTypeTemplates": {
+                    "payment-failed": "payment-failed-v1",
+                    "payment-succeeded": "payment-succeeded-v1",
+                },
             },
         )
 
@@ -160,6 +165,7 @@ class CommerceEventTests(unittest.TestCase):
         self.assertEqual(
             outboxes[0]["payload"],
             {
+                "notificationPolicyId": "payment-status",
                 "notificationType": "payment-succeeded",
                 "publishedVersionId": "version-1",
                 "templateId": "payment-succeeded-v1",
@@ -310,6 +316,20 @@ class CommerceEventTests(unittest.TestCase):
             for (table, _pk, _sk), item in fixture.backend.items.items()
         ))
 
+    def test_payment_type_not_enabled_by_the_pinned_policy_emits_no_outbox(self):
+        order_key = (OPERATIONS_TABLE, SCOPE.partition_key, "ORDER#order-1")
+        self.backend.items[order_key]["notificationTarget"]["notificationTypeTemplates"] = {
+            "payment-succeeded": "payment-succeeded-v1",
+        }
+
+        result = self.process("commerce.payment.terminal_unpaid.v1")
+
+        self.assertEqual(result["status"], "released")
+        self.assertFalse(any(
+            table == OPERATIONS_TABLE and item.get("itemType") == "Outbox"
+            for (table, _pk, _sk), item in self.backend.items.items()
+        ))
+
     def test_notification_dedupe_key_is_isolated_by_draft_scope(self):
         event = {
             "eventId": "event-1",
@@ -328,10 +348,15 @@ class CommerceEventTests(unittest.TestCase):
             "amountMinor": 180_000,
             "currency": "MXN",
             "notificationTarget": {
+                "notificationPolicyId": "payment-status",
                 "publishedVersionId": "version-1",
                 "recipientSetId": "billing-operators",
                 "recipientSetVersion": 1,
                 "recipientMemberId": "primary",
+                "notificationTypeTemplates": {
+                    "payment-failed": "payment-failed-v1",
+                    "payment-succeeded": "payment-succeeded-v1",
+                },
             },
         }
         other_scope = CommerceScope("test", "tenant-a", "draft-b", "draft-b.example.test")
@@ -342,6 +367,58 @@ class CommerceEventTests(unittest.TestCase):
         self.assertNotEqual(first["eventId"], second["eventId"])
         self.assertEqual(first["payload"]["dedupeKey"], first["eventId"])
         self.assertEqual(second["payload"]["dedupeKey"], second["eventId"])
+
+    def test_notification_event_identity_is_stable_for_replay_and_binds_the_complete_payload(self):
+        event = {
+            "eventId": "event-1",
+            "eventType": "commerce.payment.succeeded.v1",
+            "eventHash": "a" * 64,
+            "occurredAt": NOW,
+        }
+        metadata = {
+            "request_id": "event-1",
+            "correlation_id": "event-1",
+            "actor_hash": None,
+            "now_epoch": NOW,
+        }
+        target = {
+            "notificationPolicyId": "payment-status",
+            "publishedVersionId": "version-1",
+            "recipientSetId": "billing-operators",
+            "recipientSetVersion": 1,
+            "recipientMemberId": "primary",
+            "notificationTypeTemplates": {
+                "payment-failed": "payment-failed-v1",
+                "payment-succeeded": "payment-succeeded-v1",
+            },
+        }
+        order = {
+            "orderId": "order-1",
+            "amountMinor": 180_000,
+            "currency": "MXN",
+            "notificationTarget": target,
+        }
+
+        first = self.store._event_operations(SCOPE, event, {}, metadata, order=order)[1]["item"]
+        replay = self.store._event_operations(SCOPE, event, {}, metadata, order=order)[1]["item"]
+        changed_amount = self.store._event_operations(
+            SCOPE,
+            event,
+            {},
+            metadata,
+            order={**order, "amountMinor": 1},
+        )[1]["item"]
+        failed = self.store._event_operations(
+            SCOPE,
+            {**event, "eventType": "commerce.payment.terminal_unpaid.v1"},
+            {},
+            metadata,
+            order=order,
+        )[1]["item"]
+
+        self.assertEqual(first["eventId"], replay["eventId"])
+        self.assertNotEqual(first["eventId"], changed_amount["eventId"])
+        self.assertNotEqual(first["eventId"], failed["eventId"])
 
     def test_subscription_event_uses_only_the_verified_projection_boundary(self):
         data = {
@@ -503,9 +580,69 @@ class CommerceEventTests(unittest.TestCase):
             "pending",
         )
         self.assertEqual(publisher.calls[0][0], "arn:aws:sns:us-east-1:111122223333:fixed")
-        self.assertEqual(publisher.calls[0][1]["eventId"], outbox["eventId"])
+        self.assertEqual(
+            publisher.calls[0][1],
+            {
+                "schemaVersion": 1,
+                "eventId": outbox["eventId"],
+                "eventType": "notification.requested.v1",
+                "occurredAt": NOW + 60,
+                "environment": SCOPE.environment,
+                "tenantId": SCOPE.tenant_id,
+                "draftId": SCOPE.draft_id,
+                "domain": SCOPE.domain,
+                "data": outbox["payload"],
+            },
+        )
+        serialized = json.dumps(publisher.calls[0][1], sort_keys=True).lower()
+        for forbidden in (
+            "address", "body", "customer", "email", "fiscal", "paymentattempt",
+            "provider", "secret", "stripe",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, serialized)
         self.assertEqual(process_stream_batch({"Records": [record]}, relay, now_epoch=NOW + 91), {"batchItemFailures": []})
         self.assertEqual(len(publisher.calls), 1)
+
+    def test_outbox_relay_rejects_unknown_sensitive_or_invalid_policy_payload_before_publish(self):
+        cases = (
+            ("unknown", lambda payload: payload.update({"body": "forbidden"})),
+            ("missing-policy", lambda payload: payload.pop("notificationPolicyId")),
+            ("forged-policy", lambda payload: payload.update({"notificationPolicyId": "INVALID"})),
+            ("wrong-template", lambda payload: payload.update({"templateId": "payment-failed-v1"})),
+            ("paired-type-template", lambda payload: payload.update({
+                "notificationType": "payment-failed",
+                "templateId": "payment-failed-v1",
+            })),
+            ("changed-amount", lambda payload: payload["variables"]["amountMinor"].update({"value": 1})),
+            ("changed-order", lambda payload: (
+                payload["source"].update({"id": "order-other"}),
+                payload["variables"]["orderId"].update({"value": "order-other"}),
+            )),
+        )
+        for name, mutate in cases:
+            with self.subTest(name=name):
+                fixture = CommerceEventTests(methodName="runTest")
+                fixture.setUp()
+                fixture.process("commerce.payment.succeeded.v1")
+                outbox = next(
+                    item for (table, _pk, _sk), item in fixture.backend.items.items()
+                    if table == OPERATIONS_TABLE and item.get("itemType") == "Outbox"
+                )
+                mutate(outbox["payload"])
+                key = (OPERATIONS_TABLE, SCOPE.partition_key, outbox["sk"])
+                fixture.backend.items[key] = copy.deepcopy(outbox)
+                publisher = Publisher()
+                relay = OutboxRelay(
+                    fixture.store,
+                    publisher,
+                    "arn:aws:sns:us-east-1:111122223333:fixed",
+                    "test",
+                )
+
+                with self.assertRaises(StorageConflict):
+                    relay.relay(outbox, now_epoch=NOW + 90)
+                self.assertEqual(publisher.calls, [])
 
     def test_outbox_relay_rejects_wrong_environment_and_malformed_canonical_fields_before_publish(self):
         self.process("commerce.payment.succeeded.v1")

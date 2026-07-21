@@ -653,7 +653,7 @@ def _validate_notification_policies(
         if {f"{value}-v1" for value in types} != templates:
             raise PolicyResolutionError("Published notification policy is invalid")
         recipient_sets = policy.get("recipientSets")
-        if not isinstance(recipient_sets, list) or not 1 <= len(recipient_sets) <= 16:
+        if not isinstance(recipient_sets, list) or len(recipient_sets) != 1:
             raise PolicyResolutionError("Published notification policy is invalid")
         recipient_ids: set[str] = set()
         for recipient_set in recipient_sets:

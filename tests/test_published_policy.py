@@ -252,6 +252,18 @@ class PublishedPolicyResolverTests(unittest.TestCase):
         with self.assertRaises(PolicyResolutionError):
             self.resolver.resolve_checkout(environment="test", domain=DOMAIN)
 
+    def test_checkout_resolution_requires_exactly_one_recipient_set_for_the_mvp(self):
+        from src.common.published_policy import PolicyResolutionError
+
+        self.s3.objects[self.notification_key]["policies"][0]["recipientSets"].append({
+            "id": "backup-operators",
+            "version": 1,
+            "members": [{"id": "primary"}],
+        })
+
+        with self.assertRaises(PolicyResolutionError):
+            self.resolver.resolve_checkout(environment="test", domain=DOMAIN)
+
     def test_production_checkout_rejects_active_unapproved_notification_transport(self):
         from src.common.published_policy import PolicyResolutionError
 
