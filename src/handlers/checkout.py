@@ -261,8 +261,6 @@ def _handle(event: dict[str, Any], payload: dict[str, Any], request_id: str) -> 
 
 def _validate_origin_binding(event: dict[str, Any], domain: str) -> None:
     environment = os.getenv("ENVIRONMENT_NAME", "").strip().lower()
-    if environment == "prod":
-        environment = "production"
     origin = _single_origin(event)
     query = _single_preview_query(event)
     if environment == "production":

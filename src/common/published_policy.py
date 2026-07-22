@@ -711,8 +711,6 @@ def _environment(value: Any) -> str:
     if not isinstance(value, str):
         raise PolicyResolutionError("Policy environment is invalid")
     environment = value.strip().lower()
-    if environment == "prod":
-        environment = "production"
     if environment not in ENVIRONMENTS:
         raise PolicyResolutionError("Policy environment is invalid")
     return environment

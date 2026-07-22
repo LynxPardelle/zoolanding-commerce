@@ -5,15 +5,17 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 try:
     from events import IntegrationEventProcessor, parse_integration_event
+    from common.metrics import emit_metric
     from storage import CommerceStore
     from subscription_storage import SubscriptionProjectionStore
     from migration_storage import MigrationRequestStore
 except ModuleNotFoundError:
     from src.events import IntegrationEventProcessor, parse_integration_event
+    from src.common.metrics import emit_metric
     from src.storage import CommerceStore
     from src.subscription_storage import SubscriptionProjectionStore
     from src.migration_storage import MigrationRequestStore
@@ -33,6 +35,7 @@ def process_batch(
     *,
     now_epoch: int,
     expected_environment: str | None = None,
+    metric_emitter: Callable[..., None] | None = None,
 ) -> dict[str, list[dict[str, str]]]:
     if not isinstance(event, Mapping) or type(event.get("Records")) is not list:
         raise ValueError("SQS batch is invalid")
@@ -51,8 +54,19 @@ def process_batch(
             value = json.loads(raw, object_pairs_hook=_unique_object)
             parsed = parse_integration_event(value)
             if expected_environment is not None and parsed.scope.environment != expected_environment:
+                _safe_emit(
+                    metric_emitter,
+                    "TestLiveMismatch",
+                    1,
+                    environment=expected_environment,
+                )
                 raise ValueError("integration event environment mismatch")
             processor.process(parsed, now_epoch=now_epoch)
+            _emit_migration_metrics(
+                parsed,
+                metric_emitter,
+                environment=expected_environment,
+            )
         except Exception:
             failures.append({"itemIdentifier": message_id})
     return {"batchItemFailures": failures}
@@ -64,15 +78,63 @@ def lambda_handler(event: object, _context: Any) -> dict[str, list[dict[str, str
         _processor_from_environment(),
         now_epoch=int(time.time()),
         expected_environment=runtime_environment(os.getenv("ENVIRONMENT_NAME")),
+        metric_emitter=emit_metric,
     )
 
 
 def runtime_environment(value: object) -> str:
     if value == "test":
         return "test"
-    if value == "prod":
+    if value == "production":
         return "production"
     raise RuntimeError("runtime environment is unavailable")
+
+
+def _emit_migration_metrics(
+    event: Any,
+    metric_emitter: Callable[..., None] | None,
+    *,
+    environment: str | None,
+) -> None:
+    if environment is None or not event.event_type.startswith("migration."):
+        return
+    data = event.data
+    counts = data.get("counts") if isinstance(data, Mapping) else None
+    if isinstance(counts, Mapping):
+        _safe_emit(
+            metric_emitter,
+            "MigrationBacklog",
+            counts["pending"],
+            environment=environment,
+        )
+        _safe_emit(
+            metric_emitter,
+            "MigrationFailures",
+            counts["needsReview"] + counts["failed"],
+            environment=environment,
+        )
+    elif event.event_type == "migration.item_needs_review.v1":
+        _safe_emit(
+            metric_emitter,
+            "MigrationFailures",
+            1,
+            environment=environment,
+        )
+
+
+def _safe_emit(
+    metric_emitter: Callable[..., None] | None,
+    name: str,
+    value: int,
+    *,
+    environment: str,
+) -> None:
+    if metric_emitter is None:
+        return
+    try:
+        metric_emitter(name, value, environment=environment)
+    except Exception:
+        pass
 
 
 def _processor_from_environment() -> IntegrationEventProcessor:

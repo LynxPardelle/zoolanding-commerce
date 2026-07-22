@@ -7,35 +7,37 @@ Parameters:
     Type: String
     AllowedValues:
       - test
-      - prod
+      - production
   IntegrationsApiId:
-    Type: String
-    MinLength: 10
-    MaxLength: 10
-    AllowedPattern: ^[a-z0-9]{10}$
+    Type: AWS::SSM::Parameter::Value<String>
+    AllowedValues:
+      - /zoolanding/test/services/integrations/api-id
+      - /zoolanding/production/services/integrations/api-id
   ConfigRegistryTableName:
-    Type: String
-    MinLength: 3
-    MaxLength: 255
-    AllowedPattern: ^[A-Za-z0-9_.-]+$
+    Type: AWS::SSM::Parameter::Value<String>
+    AllowedValues:
+      - /zoolanding/test/config/registry-table-name
+      - /zoolanding/production/config/registry-table-name
   ConfigPayloadsBucketName:
-    Type: String
-    MinLength: 3
-    MaxLength: 63
-    AllowedPattern: ^[a-z0-9][a-z0-9.-]*[a-z0-9]$
+    Type: AWS::SSM::Parameter::Value<String>
+    AllowedValues:
+      - /zoolanding/test/config/payload-bucket-name
+      - /zoolanding/production/config/payload-bucket-name
   AuthSessionTableName:
-    Type: String
-    MinLength: 3
-    MaxLength: 255
-    AllowedPattern: ^[A-Za-z0-9_.-]+$
+    Type: AWS::SSM::Parameter::Value<String>
+    AllowedValues:
+      - /zoolanding/test/auth/session-table-name
+      - /zoolanding/production/auth/session-table-name
   AuthUserStateTableName:
-    Type: String
-    MinLength: 3
-    MaxLength: 255
-    AllowedPattern: ^[A-Za-z0-9_.-]+$
+    Type: AWS::SSM::Parameter::Value<String>
+    AllowedValues:
+      - /zoolanding/test/auth/user-state-table-name
+      - /zoolanding/production/auth/user-state-table-name
   IntegrationEventsTopicArn:
-    Type: String
-    AllowedPattern: ^arn:[A-Za-z0-9-]+:sns:[A-Za-z0-9-]+:[0-9]{12}:[A-Za-z0-9_.-]+$
+    Type: AWS::SSM::Parameter::Value<String>
+    AllowedValues:
+      - /zoolanding/test/topics/integration-events-arn
+      - /zoolanding/production/topics/integration-events-arn
   FiscalProductionApproved:
     Type: String
     AllowedValues:
@@ -55,15 +57,18 @@ Parameters:
   CommerceCursorSigningKey:
     Type: String
     NoEcho: true
-    MinLength: 32
+    MinLength: 43
     MaxLength: 128
     AllowedPattern: ^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-][AQgw]|[A-Za-z0-9_-]{2}[AEIMQUYcgkosw048])?$
+  AlarmTopicArn:
+    Type: String
+    AllowedPattern: '^arn:(aws|aws-us-gov|aws-cn):sns:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_.-]+$'
 
 Mappings:
   IntegrationsStageByEnvironment:
     test:
       Stage: test
-    prod:
+    production:
       Stage: production
 
 Globals:
@@ -107,19 +112,24 @@ Resources:
   CommerceApi:
     Type: AWS::Serverless::Api
     Properties:
+      Name:
+        Fn::Sub: ${AWS::StackName}-api
       StageName:
         Ref: EnvironmentName
       MethodSettings:
         - HttpMethod: POST
           ResourcePath: /~1features~1commerce~1public-read
+          MetricsEnabled: true
           ThrottlingRateLimit: 25
           ThrottlingBurstLimit: 50
         - HttpMethod: POST
           ResourcePath: /~1features~1commerce~1public-action
+          MetricsEnabled: true
           ThrottlingRateLimit: 10
           ThrottlingBurstLimit: 20
         - HttpMethod: POST
           ResourcePath: /~1features~1commerce~1fiscal~1request
+          MetricsEnabled: true
           ThrottlingRateLimit: 5
           ThrottlingBurstLimit: 10
       Tags:
@@ -128,6 +138,16 @@ Resources:
         ManagedBy: SAM
         Environment:
           Ref: EnvironmentName
+
+  CommerceApiIdParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: /zoolanding/${EnvironmentName}/services/commerce/api-id
+      Type: String
+      Value:
+        Ref: CommerceApi
+      Description: Published Commerce API identifier for trusted routing.
 
   CommerceCatalogTable:
     Type: AWS::DynamoDB::Table
@@ -257,6 +277,39 @@ Resources:
           Value:
             Ref: EnvironmentName
 
+  CommerceNotificationRequestsTopicArnParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: /zoolanding/${EnvironmentName}/topics/commerce-notification-requests-arn
+      Type: String
+      Value:
+        Ref: CommerceNotificationRequestsTopic
+      Description: Published ARN for Commerce notification requests.
+
+  CommerceIntegrationsCallerRoleArnsParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: /zoolanding/${EnvironmentName}/services/commerce/integrations-caller-role-arns
+      Type: StringList
+      Value:
+        Fn::Join:
+          - ','
+          - - Fn::GetAtt:
+                - CatalogActionRole
+                - Arn
+            - Fn::GetAtt:
+                - CheckoutRole
+                - Arn
+            - Fn::GetAtt:
+                - SubscriptionActionRole
+                - Arn
+            - Fn::GetAtt:
+                - ReservationReconcilerRole
+                - Arn
+      Description: Published ARNs for exact Commerce roles allowed to invoke Integrations.
+
   CommerceIntegrationEventsDlq:
     Type: AWS::SQS::Queue
     Properties:
@@ -338,6 +391,9 @@ Resources:
               ArnEquals:
                 aws:SourceArn:
                   Ref: IntegrationEventsTopicArn
+              StringEquals:
+                aws:SourceAccount:
+                  Ref: AWS::AccountId
 
   CommerceIntegrationEventsSubscription:
     Type: AWS::SNS::Subscription
@@ -448,12 +504,9 @@ Resources:
                   - dynamodb:GetShardIterator
                   - dynamodb:ListStreams
                 Resource:
-                  Fn::Sub:
-                    - ${OperationsArn}/stream/*
-                    - OperationsArn:
-                        Fn::GetAtt:
-                          - CommerceOperationsTable
-                          - Arn
+                  Fn::GetAtt:
+                    - CommerceOperationsTable
+                    - StreamArn
               - Effect: Allow
                 Action:
                   - dynamodb:GetItem
@@ -1458,6 +1511,430 @@ Resources:
             Schedule: rate(5 minutes)
             Enabled: false
 
+  Api5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Commerce API returned a server error.
+      Namespace: AWS/ApiGateway
+      MetricName: 5XXError
+      Dimensions:
+        - Name: ApiName
+          Value:
+            Fn::Sub: ${AWS::StackName}-api
+        - Name: Stage
+          Value:
+            Ref: EnvironmentName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Ref: AlarmTopicArn
+
+  PublicRead4xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Public Commerce reads returned an HTTP 4xx, including possible throttling.
+      Namespace: AWS/ApiGateway
+      MetricName: 4XXError
+      Dimensions:
+        - Name: ApiName
+          Value:
+            Fn::Sub: ${AWS::StackName}-api
+        - Name: Stage
+          Value:
+            Ref: EnvironmentName
+        - Name: Method
+          Value: POST
+        - Name: Resource
+          Value: /features/commerce/public-read
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Ref: AlarmTopicArn
+
+  PublicAction4xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Public Commerce actions returned an HTTP 4xx, including possible throttling.
+      Namespace: AWS/ApiGateway
+      MetricName: 4XXError
+      Dimensions:
+        - Name: ApiName
+          Value:
+            Fn::Sub: ${AWS::StackName}-api
+        - Name: Stage
+          Value:
+            Ref: EnvironmentName
+        - Name: Method
+          Value: POST
+        - Name: Resource
+          Value: /features/commerce/public-action
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Ref: AlarmTopicArn
+
+  FiscalRequest4xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Public fiscal requests returned an HTTP 4xx, including possible throttling.
+      Namespace: AWS/ApiGateway
+      MetricName: 4XXError
+      Dimensions:
+        - Name: ApiName
+          Value:
+            Fn::Sub: ${AWS::StackName}-api
+        - Name: Stage
+          Value:
+            Ref: EnvironmentName
+        - Name: Method
+          Value: POST
+        - Name: Resource
+          Value: /features/commerce/fiscal/request
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Ref: AlarmTopicArn
+
+  IntegrationEventWorkerErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Commerce integration-event worker returned an error.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value:
+            Ref: IntegrationEventWorkerFunction
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Ref: AlarmTopicArn
+
+  IntegrationEventWorkerThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Commerce integration-event worker was throttled.
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+        - Name: FunctionName
+          Value:
+            Ref: IntegrationEventWorkerFunction
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Ref: AlarmTopicArn
+
+  OutboxRelayErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Commerce outbox relay returned an error.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value:
+            Ref: OutboxRelayFunction
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Ref: AlarmTopicArn
+
+  OutboxRelayThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Commerce outbox relay was throttled.
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+        - Name: FunctionName
+          Value:
+            Ref: OutboxRelayFunction
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Ref: AlarmTopicArn
+
+  ReservationReconcilerErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Commerce reservation reconciler returned an error.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value:
+            Ref: ReservationReconcilerFunction
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Ref: AlarmTopicArn
+
+  ReservationReconcilerThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Commerce reservation reconciler was throttled.
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+        - Name: FunctionName
+          Value:
+            Ref: ReservationReconcilerFunction
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Ref: AlarmTopicArn
+
+  IntegrationEventsQueueAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Commerce integration events are older than the operational target.
+      Namespace: AWS/SQS
+      MetricName: ApproximateAgeOfOldestMessage
+      Dimensions:
+        - Name: QueueName
+          Value:
+            Fn::GetAtt: [CommerceIntegrationEventsQueue, QueueName]
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 300
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Ref: AlarmTopicArn
+
+  IntegrationEventsDlqAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: A failed Commerce integration event remains in the dead-letter queue.
+      Namespace: AWS/SQS
+      MetricName: ApproximateAgeOfOldestMessage
+      Dimensions:
+        - Name: QueueName
+          Value:
+            Fn::GetAtt: [CommerceIntegrationEventsDlq, QueueName]
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 60
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Ref: AlarmTopicArn
+
+  IntegrationEventsDlqDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: A failed Commerce integration event entered the dead-letter queue.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value:
+            Fn::GetAtt: [CommerceIntegrationEventsDlq, QueueName]
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Ref: AlarmTopicArn
+
+  OutboxFailureQueueAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: A failed Commerce outbox record remains unresolved.
+      Namespace: AWS/SQS
+      MetricName: ApproximateAgeOfOldestMessage
+      Dimensions:
+        - Name: QueueName
+          Value:
+            Fn::GetAtt: [CommerceOutboxFailureQueue, QueueName]
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 60
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Ref: AlarmTopicArn
+
+  OutboxFailureQueueDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: A Commerce outbox record entered the failure queue.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value:
+            Fn::GetAtt: [CommerceOutboxFailureQueue, QueueName]
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Ref: AlarmTopicArn
+
+  StaleReservationsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Commerce retained due reservations after reconciliation.
+      Namespace: Zoolanding/Commerce
+      MetricName: StaleReservations
+      Dimensions:
+        - Name: Environment
+          Value:
+            Ref: EnvironmentName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Ref: AlarmTopicArn
+
+  MigrationBacklogAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Commerce subscription migration backlog is elevated.
+      Namespace: Zoolanding/Commerce
+      MetricName: MigrationBacklog
+      Dimensions:
+        - Name: Environment
+          Value:
+            Ref: EnvironmentName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 3
+      Threshold: 25
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Ref: AlarmTopicArn
+
+  MigrationFailuresAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Commerce observed a migration failure or review item.
+      Namespace: Zoolanding/Commerce
+      MetricName: MigrationFailures
+      Dimensions:
+        - Name: Environment
+          Value:
+            Ref: EnvironmentName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Ref: AlarmTopicArn
+
+  ProviderFailuresAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Commerce could not obtain a confirmed Integrations response.
+      Namespace: Zoolanding/Commerce
+      MetricName: ProviderFailures
+      Dimensions:
+        - Name: Environment
+          Value:
+            Ref: EnvironmentName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Ref: AlarmTopicArn
+
+  TestLiveMismatchAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: An Integration event did not match the Commerce environment.
+      Namespace: Zoolanding/Commerce
+      MetricName: TestLiveMismatch
+      Dimensions:
+        - Name: Environment
+          Value:
+            Ref: EnvironmentName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Ref: AlarmTopicArn
+
 Outputs:
   ApiUrl:
     Description: Commerce API base URL.
@@ -1475,3 +1952,15 @@ Outputs:
     Description: Commerce notification request topic ARN.
     Value:
       Ref: CommerceNotificationRequestsTopic
+  CommerceApiIdParameterName:
+    Description: SSM parameter containing the Commerce API identifier.
+    Value:
+      Ref: CommerceApiIdParameter
+  NotificationRequestsTopicArnParameterName:
+    Description: SSM parameter containing the Commerce notification topic ARN.
+    Value:
+      Ref: CommerceNotificationRequestsTopicArnParameter
+  IntegrationsCallerRoleArnsParameterName:
+    Description: SSM parameter containing exact Commerce Integrations caller role ARNs.
+    Value:
+      Ref: CommerceIntegrationsCallerRoleArnsParameter

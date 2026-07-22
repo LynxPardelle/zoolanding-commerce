@@ -2,7 +2,7 @@
 
 Generic server-only commercial state for draft-configured catalogs, immutable offers, inventory, orders, subscriptions, fulfillment, migration requests, and isolated manual fiscal requests.
 
-The Phase 5 Commerce boundary and the Phase 6 Commerce notification contract are implemented and verified locally; they remain undeployed. The local service includes the immutable policy resolver, retained storage, provider-neutral domain rules, conditional inventory transactions, eight literal browser routes, exact AWS_IAM Integrations commands/status lookup, normalized integration-event consumption, an idempotent notification outbox, subscription projections, resumable bulk-migration requests and approval, reservation reconciliation, and isolated manual fiscal intake. There is no AWS `dev` environment. Test and production deployment remain closed until their external identities, alarms, quotas, cross-service dependencies, and live gates are reviewed and explicitly approved.
+The Phase 5 Commerce boundary, Phase 6 notification contract, and Phase 8 infrastructure-readiness surfaces are implemented and verified locally; they remain undeployed. The service includes the immutable policy resolver, retained storage, provider-neutral domain rules, conditional inventory transactions, eight literal browser routes, exact AWS_IAM Integrations commands/status lookup, normalized integration-event consumption, an idempotent notification outbox, subscription projections, resumable bulk-migration requests and approval, reservation reconciliation, isolated manual fiscal intake, exact environment SSM composition, protected artifact deployment workflows, redacted metrics/alarms, and a redacted readiness smoke. There is no AWS `dev` environment.
 
 ## Boundaries
 
@@ -107,13 +107,45 @@ In test, a fiscal-enabled Checkout returns a random opaque proof while Commerce 
 
 ## Deployment boundary
 
-The local SAM contract requires an environment-specific Integrations API identifier, Config Registry table and payload bucket names, Auth Admin session/state table names, the normalized Integration Events topic ARN, and a NoEcho Commerce cursor-signing key. Production fiscal capture additionally remains closed behind its explicit approval identifiers and code gate. This README records no parameter value, secret, account identifier, or deployed resource.
+The SAM contract accepts only external environments `test` and `production`. CloudFormation resolves these exact environment-scoped SSM parameter names as deployment inputs:
 
-The reservation reconciler's five-minute schedule is declared but disabled. Phase 8 must verify the exact cross-service IAM routes, deployment parameters, queues/topics, alarms, quotas, rollback, and provider-status evidence before explicitly enabling it. No local Phase 5 result authorizes an AWS deployment or schedule activation.
+- `/zoolanding/{environment}/services/integrations/api-id`;
+- `/zoolanding/{environment}/topics/integration-events-arn`;
+- `/zoolanding/{environment}/config/registry-table-name`;
+- `/zoolanding/{environment}/config/payload-bucket-name`;
+- `/zoolanding/{environment}/auth/session-table-name`;
+- `/zoolanding/{environment}/auth/user-state-table-name`.
+
+After a successful stack deployment, Commerce publishes only safe identifiers at `/zoolanding/{environment}/services/commerce/api-id`, `/zoolanding/{environment}/topics/commerce-notification-requests-arn`, and `/zoolanding/{environment}/services/commerce/integrations-caller-role-arns`. The last parameter is a `StringList` containing exactly the dedicated Catalog action, Checkout, Subscription action, and Reservation reconciler role ARNs so Integrations can authorize its real Commerce callers without a bootstrap-time hard-coded ARN. It never publishes a secret, credential, customer value, provider payload, or cursor-signing key through SSM or stack outputs.
+
+The initial cross-service rollout uses a fail-closed two-pass bootstrap: deploy Integrations with an explicitly empty Commerce caller set, deploy Commerce to publish the four exact role ARNs, then update Integrations from that SSM parameter before any Commerce-to-Integrations readiness check is accepted. An empty, missing, malformed, cross-account, or wrong-environment caller set must keep those internal routes denied.
+
+GitHub environment configuration must supply `AWS_ROLE_ARN`, `AWS_CLOUDFORMATION_ROLE_ARN`, `ALARM_TOPIC_ARN`, and the secret `COMMERCE_CURSOR_SIGNING_KEY`. The validation job has no OIDC permission, creates the exact SAM artifact and SHA-256 manifest, and uploads it with one-day retention. Only the dependent environment-protected deploy job receives `id-token: write`; it revalidates the exact `dev -> test -> main` merge, artifact digest and closed file set before assuming the deploy role. It then validates every cross-service SSM value before invoking SAM with the retained CloudFormation execution role. There is no deploy workflow, stack profile, or cloud resource for `dev`.
+
+`ALARM_TOPIC_ARN` is used only for operator alarm actions. Native API Gateway, Lambda, and SQS metrics cover 5xx, background errors/throttles, queue age, and failure depth. PII-free embedded metrics cover stale reservations, migration backlog/failures, provider failures, and test/live mismatches under `Zoolanding/Commerce` with only the environment dimension. Production fiscal capture remains forced off in both deployment workflows and closed behind its separate approval/code gate.
+
+Detailed API Gateway metrics are enabled only for the three throttled public `POST` routes. These method-scoped 4XXError alarms intentionally combine HTTP 400, 403, and 429 because the native metric cannot distinguish validation, authorization, and throttling responses. Operators must treat an alarm as a route-specific investigation signal, not proof of throttling. No API Gateway access logs or AWS WAF are introduced by this MVP.
+
+No AWS deployment was performed while adding these Phase 8 surfaces. No real role ARN, topic ARN, secret, account identifier, or deployed resource value is recorded here.
+
+The reservation reconciler's five-minute schedule remains declared but disabled. Enabling it still requires an authorized test deployment, exact cross-service evidence, quota review, alarm observation, and rollback proof. No local result authorizes an AWS deployment or schedule activation.
+
+## Redacted readiness smoke
+
+After an authorized deployment, configure only the caller environment and run:
+
+```powershell
+$env:ZLP_COMMERCE_SMOKE_API_URL = 'https://{api-id}.execute-api.us-east-1.amazonaws.com/test'
+$env:ZLP_COMMERCE_SMOKE_DOMAIN = 'configured-test-domain.example'
+$env:AWS_REGION = 'us-east-1'
+python tools/commerce_readiness_smoke.py
+```
+
+The script accepts no credential, token, password, or secret command-line argument. If the caller's environment/default AWS chain contains credentials, the script neither reads nor prints them because the selected Commerce public-read check does not require SigV4. Output is limited to status, attempt count, the environment derived only from the validated API URL stage (`test` or `production`, otherwise `null`), one integer `observedAtEpoch`, and the closed classifications `ready`, `missing_input`, `auth_failure`, `configuration_failure`, `provider_failure`, or `propagation_delay`. The clock is captured once per run; `ZLP_COMMERCE_SMOKE_PROPAGATION_UNTIL_EPOCH` may mark only a bounded 15-minute deployment propagation window.
 
 ## Local Verification
 
-The Phase 6 Commerce working tree passes 263 unit and contract tests. One local test is intentionally skipped when `botocore`, supplied by the Lambda/SAM runtime, is not importable from the workstation interpreter.
+The Phase 8 Commerce verification baseline includes unit, contract, infrastructure, metrics, smoke, dependency, SAM lint/build, built-handler import, workflow, and public-safety checks. One local test is intentionally skipped when `botocore`, supplied by the Lambda/SAM runtime, is not importable from the workstation interpreter.
 
 ```powershell
 python -m unittest discover -s tests -p "test_*.py"

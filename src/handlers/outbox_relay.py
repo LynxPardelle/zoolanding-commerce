@@ -67,7 +67,7 @@ def _relay_from_environment() -> OutboxRelay:
 def runtime_environment(value: object) -> str:
     if value == "test":
         return "test"
-    if value == "prod":
+    if value == "production":
         return "production"
     raise RuntimeError("runtime environment is unavailable")
 

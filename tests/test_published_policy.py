@@ -296,7 +296,7 @@ class PublishedPolicyResolverTests(unittest.TestCase):
         self.s3.objects[f"{prefix}{DOMAIN}/server/commerce.json"] = commerce_policy("production")
         self.s3.objects[f"{prefix}{DOMAIN}/server/auth-profile-registry.json"] = auth_registry()
 
-        resolved = self.resolve(environment="prod")
+        resolved = self.resolve(environment="production")
 
         self.assertEqual(resolved.environment, "production")
         self.assertEqual(resolved.version_id, "prod-v1")

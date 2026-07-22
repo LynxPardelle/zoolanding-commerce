@@ -31,9 +31,9 @@ class ReservationReconcilerHandlerTests(unittest.TestCase):
     def tearDown(self):
         reservation_reconciler._RECONCILER = self.original
 
-    def test_handler_normalizes_prod_and_uses_server_time(self):
+    def test_handler_uses_exact_production_environment_and_server_time(self):
         output = io.StringIO()
-        with mock.patch.dict(os.environ, {"ENVIRONMENT_NAME": "prod"}, clear=False), mock.patch.object(
+        with mock.patch.dict(os.environ, {"ENVIRONMENT_NAME": "production"}, clear=False), mock.patch.object(
             reservation_reconciler.time,
             "time",
             return_value=1_900_000_000.9,
@@ -50,7 +50,7 @@ class ReservationReconcilerHandlerTests(unittest.TestCase):
         self.assertEqual(remaining_time_ms(), 8_000)
         self.assertEqual(call, {"environment": "production", "now_epoch": 1_900_000_000})
         lines = output.getvalue().splitlines()
-        self.assertEqual(len(lines), 1)
+        self.assertEqual(len(lines), 2)
         log = json.loads(lines[0])
         self.assertEqual(set(log), {"environment", "counters", "budget"})
         self.assertEqual(log["environment"], "production")
@@ -58,6 +58,11 @@ class ReservationReconcilerHandlerTests(unittest.TestCase):
         self.assertEqual(log["budget"], {"workLimit": 25, "minimumRemainingTimeMs": 1_500})
         self.assertNotIn("must-not-be-logged", lines[0])
         self.assertNotIn("private@example.test", lines[0])
+        metric = json.loads(lines[1])
+        self.assertEqual(metric["Environment"], "production")
+        self.assertEqual(metric["StaleReservations"], 1)
+        self.assertNotIn("must-not-be-logged", lines[1])
+        self.assertNotIn("private@example.test", lines[1])
 
     def test_handler_fails_closed_for_an_unconfigured_environment(self):
         with mock.patch.dict(os.environ, {"ENVIRONMENT_NAME": "dev"}, clear=False):

@@ -510,22 +510,83 @@ class CommerceEventTests(unittest.TestCase):
             }]
         }
         before = copy.deepcopy(self.backend.items)
+        metrics = []
         self.assertEqual(
             process_sqs_batch(
                 batch,
                 self.processor,
                 now_epoch=NOW + 60,
                 expected_environment="production",
+                metric_emitter=lambda name, value, **dimensions: metrics.append(
+                    (name, value, dimensions)
+                ),
             ),
             {"batchItemFailures": [{"itemIdentifier": "message-wrong-env"}]},
         )
         self.assertEqual(self.backend.items, before)
+        self.assertEqual(
+            metrics,
+            [("TestLiveMismatch", 1, {"environment": "production"})],
+        )
 
-    def test_runtime_environment_maps_only_test_and_prod(self):
+    def test_sqs_worker_emits_only_aggregate_migration_metrics_after_processing(self):
+        data = {
+            "commercialRequestId": "migration-request-1",
+            "jobId": "migration-job-1",
+            "connectionId": "payments-primary",
+            "revision": 2,
+            "dedupeKey": "migration-dedupe-1",
+            "state": "running",
+            "counts": {
+                "total": 30,
+                "pending": 25,
+                "applied": 2,
+                "needsReview": 1,
+                "failed": 2,
+            },
+        }
+        batch = {
+            "Records": [{
+                "messageId": "message-migration",
+                "body": json.dumps(envelope("migration.progressed.v1", data)),
+            }]
+        }
+
+        class AcceptingProcessor:
+            def __init__(self):
+                self.calls = []
+
+            def process(self, parsed, *, now_epoch):
+                self.calls.append((parsed, now_epoch))
+                return {"status": "accepted"}
+
+        processor = AcceptingProcessor()
+        metrics = []
+        result = process_sqs_batch(
+            batch,
+            processor,
+            now_epoch=NOW + 60,
+            expected_environment="test",
+            metric_emitter=lambda name, value, **dimensions: metrics.append(
+                (name, value, dimensions)
+            ),
+        )
+
+        self.assertEqual(result, {"batchItemFailures": []})
+        self.assertEqual(len(processor.calls), 1)
+        self.assertEqual(
+            metrics,
+            [
+                ("MigrationBacklog", 25, {"environment": "test"}),
+                ("MigrationFailures", 3, {"environment": "test"}),
+            ],
+        )
+
+    def test_runtime_environment_accepts_only_test_and_production(self):
         self.assertEqual(integration_runtime_environment("test"), "test")
-        self.assertEqual(integration_runtime_environment("prod"), "production")
-        self.assertEqual(outbox_runtime_environment("prod"), "production")
-        for value in ("", "dev", "production", "TEST"):
+        self.assertEqual(integration_runtime_environment("production"), "production")
+        self.assertEqual(outbox_runtime_environment("production"), "production")
+        for value in ("", "dev", "prod", "TEST"):
             with self.subTest(value=value), self.assertRaises(RuntimeError):
                 integration_runtime_environment(value)
 

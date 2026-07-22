@@ -15,10 +15,12 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 try:
+    from common.metrics import emit_metric
     from domain.limits import MAX_COMMAND_INTEGER
     from domain.offers import DiscountVersion, OfferVersion
     from storage import CommerceScope
 except ModuleNotFoundError:
+    from src.common.metrics import emit_metric
     from src.domain.limits import MAX_COMMAND_INTEGER
     from src.domain.offers import DiscountVersion, OfferVersion
     from src.storage import CommerceScope
@@ -96,6 +98,7 @@ class SigV4ExecuteApiTransport:
         credentials: Any = None,
         opener: Any = None,
         signer: Any = None,
+        metric_emitter: Any = None,
     ) -> None:
         if type(api_id) is not str or _API_ID_RE.fullmatch(api_id) is None:
             raise GatewayConfigurationError("Integrations gateway configuration is invalid")
@@ -106,24 +109,30 @@ class SigV4ExecuteApiTransport:
         suffix = "amazonaws.com.cn" if region.startswith("cn-") else "amazonaws.com"
         self._origin = f"https://{api_id}.execute-api.{region}.{suffix}/{stage}"
         self._region = region
+        self._environment = stage
         self._credentials = credentials
         self._opener = opener or build_opener(_NoRedirect())
         if signer is not None and not hasattr(signer, "sign"):
             raise GatewayConfigurationError("Integrations gateway configuration is invalid")
         self._signer = signer
+        self._metric_emitter = metric_emitter
 
     @classmethod
     def from_environment(cls) -> "SigV4ExecuteApiTransport":
         environment = os.getenv("ENVIRONMENT_NAME", "").strip().lower()
-        if environment not in {"test", "prod"}:
+        if environment not in {"test", "production"}:
             raise GatewayConfigurationError("Integrations gateway configuration is invalid")
         api_id = os.getenv("INTEGRATIONS_API_ID", "").strip().lower()
         region = (
             os.getenv("AWS_REGION", "").strip().lower()
             or os.getenv("AWS_DEFAULT_REGION", "").strip().lower()
         )
-        integrations_stage = "production" if environment == "prod" else "test"
-        return cls(api_id=api_id, stage=integrations_stage, region=region)
+        return cls(
+            api_id=api_id,
+            stage=environment,
+            region=region,
+            metric_emitter=emit_metric,
+        )
 
     def request(self, method: str, path: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         if type(method) is not str or _ROUTES.get(path) != method:
@@ -143,15 +152,29 @@ class SigV4ExecuteApiTransport:
                 if exc.code == 409:
                     raise IntegrationsConflict("Integrations command conflicts with current state") from None
                 if exc.code not in _RETRYABLE_HTTP or attempt + 1 == MAX_ATTEMPTS:
+                    self._emit_provider_failure()
                     raise IntegrationsUnavailable("Integrations service is unavailable") from None
             except IntegrationsConflict:
                 raise
             except (IntegrationsUnavailable, URLError, socket.timeout, TimeoutError, OSError):
                 if attempt + 1 == MAX_ATTEMPTS:
+                    self._emit_provider_failure()
                     raise IntegrationsUnavailable("Integrations service is unavailable") from None
             except Exception:
+                self._emit_provider_failure()
                 raise IntegrationsUnavailable("Integrations service is unavailable") from None
+        self._emit_provider_failure()
         raise IntegrationsUnavailable("Integrations service is unavailable")
+
+    def _emit_provider_failure(self) -> None:
+        if self._metric_emitter is None:
+            return
+        try:
+            self._metric_emitter(
+                "ProviderFailures", 1, environment=self._environment
+            )
+        except Exception:
+            pass
 
     def _signed_headers(self, method: str, url: str, body: bytes) -> dict[str, str]:
         headers = {"Content-Type": "application/json; charset=utf-8"}

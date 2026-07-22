@@ -225,6 +225,40 @@ class SigV4TransportTests(unittest.TestCase):
         self.assertNotIn("private", str(timeout_error.exception))
         self.assertEqual(len(timed_out.calls), 2)
 
+    def test_final_provider_failure_emits_one_environment_only_metric(self):
+        from src.integrations_gateway import IntegrationsUnavailable, SigV4ExecuteApiTransport
+
+        opener = FakeOpener([
+            HTTPError("https://example.invalid", 503, "provider detail", {}, None),
+            socket.timeout("private network detail"),
+        ])
+        metrics = []
+        transport = SigV4ExecuteApiTransport(
+            api_id="abcdefghij",
+            stage="test",
+            region="us-east-1",
+            credentials=SimpleNamespace(
+                access_key="access", secret_key="secret", token="session"
+            ),
+            opener=opener,
+            signer=FakeSigner(),
+            metric_emitter=lambda name, value, **dimensions: metrics.append(
+                (name, value, dimensions)
+            ),
+        )
+
+        with self.assertRaisesRegex(IntegrationsUnavailable, "unavailable"):
+            transport.request(
+                "POST",
+                "/internal/v1/stripe/checkout",
+                {"idempotencyKey": "stable"},
+            )
+
+        self.assertEqual(
+            metrics,
+            [("ProviderFailures", 1, {"environment": "test"})],
+        )
+
 
 class IntegrationsGatewayContractTests(unittest.TestCase):
     def test_offer_command_uses_exact_snapshot_hash_scope_route_and_idempotency(self):
