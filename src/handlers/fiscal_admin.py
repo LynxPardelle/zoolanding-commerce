@@ -8,7 +8,7 @@ import time
 from typing import Any
 
 try:  # Lambda CodeUri is src/.
-    from common.auth_admin import authorize_request
+    from common.auth_admin import authorize_request, require_session_cookie
     from common.http import (
         HttpError,
         closed_object,
@@ -30,7 +30,7 @@ try:  # Lambda CodeUri is src/.
         validate_fiscal_details,
     )
 except ModuleNotFoundError:  # Repository-root tests import src.*.
-    from src.common.auth_admin import authorize_request
+    from src.common.auth_admin import authorize_request, require_session_cookie
     from src.common.http import (
         HttpError,
         closed_object,
@@ -76,6 +76,7 @@ def _handle(event: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     if type(operation) is not str or operation not in OPERATIONS:
         raise validation_error()
     input_value = _validated_input(operation, request["input"])
+    require_session_cookie(event)
     policies = resolve_policies(domain_header(event))
     commerce = validated_commerce(policies)
     context = authorize_request(

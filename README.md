@@ -2,7 +2,7 @@
 
 Generic server-only commercial state for draft-configured catalogs, immutable offers, inventory, orders, subscriptions, fulfillment, migration requests, and isolated manual fiscal requests.
 
-The Phase 5 Commerce boundary and the Phase 6 Commerce notification contract are implemented and verified locally; they remain undeployed. The local service includes the immutable policy resolver, retained storage, provider-neutral domain rules, conditional inventory transactions, eight literal browser routes, exact AWS_IAM Integrations commands/status lookup, normalized integration-event consumption, an idempotent notification outbox, subscription projections, resumable bulk-migration requests and approval, reservation reconciliation, and isolated manual fiscal intake. There is no AWS `dev` environment. Test and production deployment remain closed until their external identities, alarms, quotas, cross-service dependencies, and live gates are reviewed and explicitly approved.
+The Phase 5 Commerce boundary, Phase 6 notification contract, and Phase 8 infrastructure-readiness surfaces are implemented and verified locally; they remain undeployed. The service includes the immutable policy resolver, retained storage, provider-neutral domain rules, conditional inventory transactions, eight literal browser routes, exact AWS_IAM Integrations commands/status lookup, normalized integration-event consumption, an idempotent notification outbox, subscription projections, resumable bulk-migration requests and approval, reservation reconciliation, isolated manual fiscal intake, exact environment SSM composition, protected artifact deployment workflows, redacted metrics/alarms, and a redacted readiness smoke. There is no AWS `dev` environment.
 
 ## Boundaries
 
@@ -36,7 +36,7 @@ The undeployed SAM template owns three draft-scoped storage boundaries:
 
 All three use on-demand billing, server-side encryption, point-in-time recovery, retained replacement/deletion policy, and server-owned `pk`/`sk` keys. Catalog and Operations enable `expiresAt` TTL for eligible cleanup records only; Fiscal has no TTL until its approved retention policy exists. Only Operations enables a `NEW_IMAGE` DynamoDB Stream. Catalog has one sparse `KEYS_ONLY` `ReservationDueIndex`; the reconciler queries it and strongly rereads each base marker.
 
-The undeployed template also defines the Commerce notification-request topic, the Integration Events queue and DLQ, and a distinct outbox-stream failure queue. The SQS consumer and DynamoDB Stream relay report partial batch failures. The stream mapping accepts only pending Commerce Outbox records. The canonical provider-status gateway is wired locally. The five-minute reconciliation schedule remains disabled until an approved deployment supplies the reviewed environment-specific `IntegrationsApiId`, verifies the cross-service route/IAM contract, and explicitly enables the schedule.
+The undeployed template also defines the Commerce notification-request topic, the Integration Events queue and DLQ, and a distinct outbox-stream failure queue. The SQS consumer and DynamoDB Stream relay report partial batch failures. The stream mapping accepts only pending Commerce Outbox records. The canonical provider-status gateway is wired locally. The template enables five-minute reconciliation so a future approved deployment cannot silently omit recovery; deployment remains blocked until the reviewed environment-specific `IntegrationsApiId`, cross-service route/IAM contract, alarms, and rollback evidence are ready.
 
 ## Domain Foundation
 
@@ -75,14 +75,14 @@ Commerce owns the durable commercial request and operator approval, while Integr
 - tracked stock keeps exact integer `onHand = available + reserved` state and a conditional revision; untracked lines create no stock mutation;
 - a positive adjustment from expected revision zero initializes tracked stock, while later positive or negative adjustments cannot consume reserved stock;
 - reservation aggregates lines by stock target, then creates stock updates, immutable movements, the Catalog reservation/due marker, Operations order, scoped PaymentAttempt binding, and 90-day idempotency receipt in one cross-table transaction;
-- a Checkout accepts at most 20 distinct immutable OfferVersions and at most 1,000,000 units per line as a code-owned abuse/storage ceiling; drafts and provider adapters may impose lower business limits. Twenty distinct tracked targets produce 45 unique actions, validated with the complete serialized plan before DynamoDB is called;
+- a Checkout accepts at most 20 distinct immutable OfferVersions and at most 1,000,000 untracked units per line as a code-owned storage ceiling. Tracked lines are capped at 10 units each and 20 units across the complete public Checkout; drafts and provider adapters may impose lower business limits. Twenty distinct tracked targets at one unit each still produce 45 unique actions, validated with the complete serialized plan before DynamoDB is called;
 - `reservationCreatedAt`, `checkoutExpiresAt = created + 2,100 seconds`, and the initial reconciliation time `expires + 300 seconds` use one injected server timestamp;
 - commit and release update stock, reservation, due marker, and order atomically, are mutually exclusive, and require a closed canonical completion reason; refund is not a stock transition;
 - timeout, network, throttling, `5xx`, and unknown provider results classify as hold/retry/reconcile, never release; a missing response is reconciled through the durable receipt before an outcome is returned;
 - uncertain due reservations move their draft-scoped marker forward by exactly five minutes, so one unresolved item cannot indefinitely hide later items; no scan or TTL acts as a commercial timer;
 - environment, tenant, and draft prefix every key, and the short DynamoDB client token is derived from both that scope and the exact transaction plan.
 
-The reconciler never treats unavailable or ambiguous provider evidence as permission to release stock. The exact internal provider-status call and evidence adapter are implemented locally, while the schedule stays disabled until the reviewed `IntegrationsApiId` and explicit deployment enablement are present. No Commerce code contains a provider credential, customer identity document, raw provider payload, or persisted public provider URL.
+The reconciler never treats unavailable or ambiguous provider evidence as permission to release stock. The exact internal provider-status call and evidence adapter are implemented locally, and the undeployed template schedules recovery every five minutes. No Commerce code contains a provider credential, customer identity document, raw provider payload, or persisted public provider URL.
 
 ## Server Boundaries
 
@@ -97,7 +97,7 @@ The API uses separate literal POST routes instead of a body-selected IAM router:
 - `/features/commerce/fiscal/request` accepts a same-origin, single-use order-access proof only after verified payment state makes it eligible;
 - `/features/commerce/fiscal/admin` uses the distinct `commerce:fiscal:manage` capability and Fiscal-only PII access.
 
-Protected handlers re-read Auth Admin session and current user state and require CSRF for mutations. Each of the eleven Lambdas has a dedicated explicit role with inline least-privilege access and writes only to the retained Commerce log group; no AWS-managed execution policy or wildcard resource is attached. Catalog, inventory, Checkout, fiscal, event-consumer, relay, and reconciler Lambdas receive only their required table/topic/config permissions. Normalized Integration Events contain no email address, fiscal field, secret, or raw provider object. Confirmed payment state can create a pinned `notification.requested.v1` outbox record in the same transaction; only the relay publishes it and marks delivery idempotently.
+Protected handlers reject a missing session cookie before published-policy I/O, then re-read Auth Admin session and current user state; mutations also require CSRF. Every browser route has an explicit API Gateway method throttle. Each of the eleven Lambdas has a dedicated explicit role with inline least-privilege access and writes only to the retained Commerce log group; no AWS-managed execution policy or wildcard resource is attached. Catalog, inventory, Checkout, fiscal, event-consumer, relay, and reconciler Lambdas receive only their required table/topic/config permissions. Normalized Integration Events contain no email address, fiscal field, secret, or raw provider object. Confirmed payment state can create a pinned `notification.requested.v1` outbox record in the same transaction; only the relay publishes it and marks delivery idempotently.
 
 Checkout derives `notificationPolicyId`, immutable `publishedVersionId`, the one MVP recipient-set ID/version/member, and the exact configured `notificationType -> templateId` mapping from the same-version policy referenced by Commerce configuration. Browser input cannot choose any notification policy, recipient, type, or template. The complete target is stored on the Order and included in the Checkout request hash; a payment transition not enabled by that pinned mapping creates no notification outbox. Every emitted event ID and dedupe key bind the scope, source event, and complete canonical payload excluding the self-referential dedupe field. `notification.requested.v1` permits only the exact payment-success/payment-failure template pairs, a `commerce-order` source, and typed `orderId`, `amountMinor`, and `currency` variables. Unknown fields and any address, message body, credential reference, fiscal field, provider payload, or payment-provider data fail closed before write or publish.
 
@@ -107,13 +107,45 @@ In test, a fiscal-enabled Checkout returns a random opaque proof while Commerce 
 
 ## Deployment boundary
 
-The local SAM contract requires an environment-specific Integrations API identifier, Config Registry table and payload bucket names, Auth Admin session/state table names, the normalized Integration Events topic ARN, and a NoEcho Commerce cursor-signing key. Production fiscal capture additionally remains closed behind its explicit approval identifiers and code gate. This README records no parameter value, secret, account identifier, or deployed resource.
+The SAM contract accepts only external environments `test` and `production`. CloudFormation resolves these exact environment-scoped SSM parameter names as deployment inputs:
 
-The reservation reconciler's five-minute schedule is declared but disabled. Phase 8 must verify the exact cross-service IAM routes, deployment parameters, queues/topics, alarms, quotas, rollback, and provider-status evidence before explicitly enabling it. No local Phase 5 result authorizes an AWS deployment or schedule activation.
+- `/zoolanding/{environment}/services/integrations/api-id`;
+- `/zoolanding/{environment}/topics/integration-events-arn`;
+- `/zoolanding/{environment}/config/registry-table-name`;
+- `/zoolanding/{environment}/config/payload-bucket-name`;
+- `/zoolanding/{environment}/auth/session-table-name`;
+- `/zoolanding/{environment}/auth/user-state-table-name`.
+
+After a successful stack deployment, Commerce publishes only safe identifiers at `/zoolanding/{environment}/services/commerce/api-id`, `/zoolanding/{environment}/topics/commerce-notification-requests-arn`, and `/zoolanding/{environment}/services/commerce/integrations-caller-role-arns`. The last parameter is a `StringList` containing exactly the dedicated Catalog action, Checkout, Subscription action, and Reservation reconciler role ARNs so Integrations can authorize its real Commerce callers without a bootstrap-time hard-coded ARN. It never publishes a secret, credential, customer value, provider payload, or cursor-signing key through SSM or stack outputs.
+
+The initial cross-service rollout uses a fail-closed two-pass bootstrap: deploy Integrations with an explicitly empty Commerce caller set, deploy Commerce to publish the four exact role ARNs, then update Integrations from that SSM parameter before any Commerce-to-Integrations readiness check is accepted. An empty, missing, malformed, cross-account, or wrong-environment caller set must keep those internal routes denied.
+
+GitHub environment configuration must supply `AWS_ROLE_ARN`, `AWS_CLOUDFORMATION_ROLE_ARN`, `ALARM_TOPIC_ARN`, and `COMMERCE_CURSOR_SIGNING_KEY` as GitHub Environment secrets, never repository variables. Each secret is scoped only to the workflow step that needs it. The validation job has no OIDC permission, creates the exact SAM artifact and SHA-256 manifest, and uploads it with one-day retention. Only the dependent environment-protected deploy job receives `id-token: write`; it revalidates the exact `dev -> test -> main` merge, artifact digest and closed file set before assuming the deploy role. It then validates every cross-service SSM value before invoking SAM with the retained CloudFormation execution role. There is no deploy workflow, stack profile, or cloud resource for `dev`.
+
+`ALARM_TOPIC_ARN` is used only for operator alarm actions. Native API Gateway, Lambda, and SQS metrics cover 5xx, background errors/throttles, queue age, and failure depth. PII-free embedded metrics cover stale reservations, migration backlog/failures, provider failures, and test/live mismatches under `Zoolanding/Commerce` with only the environment dimension. Production fiscal capture remains forced off in both deployment workflows and closed behind its separate approval/code gate.
+
+Detailed API Gateway metrics and explicit throttles cover all eight browser `POST` routes. The three public method-scoped 4XXError alarms intentionally combine HTTP 400, 403, and 429 because the native metric cannot distinguish validation, authorization, and throttling responses. Operators must treat an alarm as a route-specific investigation signal, not proof of throttling. No API Gateway access logs or AWS WAF are introduced by this MVP.
+
+No AWS deployment was performed while adding these Phase 8 surfaces. No real role ARN, topic ARN, secret, account identifier, or deployed resource value is recorded here.
+
+The reservation reconciler's five-minute schedule is enabled in the undeployed template. Any deployment still requires explicit authorization, exact cross-service evidence, quota review, alarm observation, and rollback proof. No local result authorizes an AWS deployment.
+
+## Redacted readiness smoke
+
+After an authorized deployment, configure only the caller environment and run:
+
+```powershell
+$env:ZLP_COMMERCE_SMOKE_API_URL = 'https://{api-id}.execute-api.us-east-1.amazonaws.com/test'
+$env:ZLP_COMMERCE_SMOKE_DOMAIN = 'configured-test-domain.example'
+$env:AWS_REGION = 'us-east-1'
+python tools/commerce_readiness_smoke.py
+```
+
+The script accepts no credential, token, password, or secret command-line argument. If the caller's environment/default AWS chain contains credentials, the script neither reads nor prints them because the selected Commerce public-read check does not require SigV4. Output is limited to status, attempt count, the environment derived only from the validated API URL stage (`test` or `production`, otherwise `null`), one integer `observedAtEpoch`, and the closed classifications `ready`, `missing_input`, `auth_failure`, `configuration_failure`, `provider_failure`, or `propagation_delay`. The clock is captured once per run; `ZLP_COMMERCE_SMOKE_PROPAGATION_UNTIL_EPOCH` may mark only a bounded 15-minute deployment propagation window.
 
 ## Local Verification
 
-The Phase 6 Commerce working tree passes 263 unit and contract tests. One local test is intentionally skipped when `botocore`, supplied by the Lambda/SAM runtime, is not importable from the workstation interpreter.
+The Phase 8 Commerce verification baseline includes unit, contract, infrastructure, metrics, smoke, dependency, SAM lint/build, built-handler import, workflow, and public-safety checks. One local test is intentionally skipped when `botocore`, supplied by the Lambda/SAM runtime, is not importable from the workstation interpreter.
 
 ```powershell
 python -m unittest discover -s tests -p "test_*.py"

@@ -34,6 +34,7 @@ def api_event(path, payload, *, headers=None, method="POST"):
     base_headers = {
         "x-zlp-domain": DOMAIN,
         "x-zlp-auth-profile-id": "staff",
+        "cookie": "__Host-zlp_session=session-value",
         "idempotency-key": "operation-1",
         "origin": f"https://{DOMAIN}",
     }
@@ -197,6 +198,47 @@ class CatalogHandlerContractTests(unittest.TestCase):
         for module in (catalog_action, catalog_public_read, catalog_read, inventory_action):
             with self.subTest(module=module.__name__):
                 self.assertTrue(hasattr(module, "lambda_handler"))
+
+    def test_protected_catalog_and_inventory_routes_reject_missing_session_before_policy_io(self):
+        from src.handlers import catalog_action, catalog_read, inventory_action
+
+        cases = (
+            (
+                catalog_read,
+                "/features/commerce/read",
+                {"operation": "itemList", "input": {}},
+            ),
+            (
+                catalog_action,
+                "/features/commerce/catalog/action",
+                {
+                    "operation": "createItem",
+                    "input": {
+                        "itemId": "landing",
+                        "sellableType": "service",
+                        "variants": [{"variantId": "base", "sku": "LANDING-BASE"}],
+                    },
+                },
+            ),
+            (
+                inventory_action,
+                "/features/commerce/inventory/action",
+                {
+                    "operation": "adjustStock",
+                    "input": {"stockId": "landing", "delta": 1, "expectedRevision": 1},
+                },
+            ),
+        )
+        for module, path, payload in cases:
+            request = api_event(path, payload)
+            request["headers"].pop("cookie")
+            with self.subTest(module=module.__name__), patch.object(
+                module, "resolve_policies"
+            ) as resolver:
+                response = module.lambda_handler(request, None)
+
+            self.assertEqual(response["statusCode"], 401)
+            resolver.assert_not_called()
 
     def test_catalog_store_uses_conditional_immutable_versions_and_public_projection(self):
         from src.catalog_storage import CatalogStore

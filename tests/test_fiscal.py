@@ -101,6 +101,7 @@ def api_event(path, payload, *, origin="https://example.com", idempotency_key="f
     headers = {
         "X-ZLP-Domain": "example.com",
         "X-ZLP-Auth-Profile-Id": "staff",
+        "Cookie": "__Host-zlp_session=session-value",
     }
     if idempotency_key is not None:
         headers["Idempotency-Key"] = idempotency_key
@@ -358,6 +359,18 @@ class FiscalHandlerTests(FiscalScenario):
         super().setUp()
         self.policies = resolved_policies()
         self.payment_event("commerce.payment.succeeded.v1")
+
+    def test_admin_missing_session_is_rejected_before_published_policy_io(self):
+        request = api_event(
+            "/features/commerce/fiscal/admin",
+            {"operation": "getRequest", "input": {"requestId": "request-1"}},
+        )
+        request["headers"].pop("Cookie")
+        with patch.object(fiscal_admin, "resolve_policies") as resolver:
+            response = fiscal_admin.lambda_handler(request, None)
+
+        self.assertEqual(response["statusCode"], 401)
+        resolver.assert_not_called()
 
     def public_request(self, payload, *, origin="https://example.com", key="fixture", policies=None):
         with (

@@ -2,16 +2,20 @@ name: CI
 
 on:
   push:
-    branches: [dev, test, main, 'codex/**']
   pull_request:
-    branches: [dev, test, main]
 
 permissions:
   contents: read
+  pull-requests: read
+
+concurrency:
+  group: commerce-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   guard:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Enforce protected promotion graph
         shell: bash
@@ -30,6 +34,7 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: guard
     env:
       AWS_DEFAULT_REGION: us-east-1
@@ -40,7 +45,16 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
+      - name: Verify exact clean commit
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -z "$(git status --porcelain)"
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.13'
@@ -48,15 +62,24 @@ jobs:
         run: |
           python -m pip install --disable-pip-version-check -r requirements.txt PyYAML==6.0.2 pip-audit==2.10.1 aws-sam-translator==1.111.0
           python -m pip_audit -r src/requirements.txt
-      - name: Run unit tests
-        run: python -m unittest discover -s tests -p "test_*.py"
+      - name: Run unit and syntax tests
+        run: |
+          python -m unittest discover -s tests -p "test_*.py"
+          python -m compileall -q src tools tests
       - uses: aws-actions/setup-sam@89ddb14d60e682855e3fea4be85b3c56485de310 # v3
         with:
           version: 1.163.0
           use-installer: true
           token: ${{ github.token }}
-      - name: Validate local-only SAM scaffold
+      - name: Validate exact SAM build
+        shell: bash
         run: |
+          set -euo pipefail
           sam validate --lint
           sam build --no-cached
+          test -f .aws-sam/build/template.yaml
           python tests/verify_sam_build.py
+      - name: Scan current tree and history for secrets
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -597,7 +597,7 @@ class CheckoutHandlerContractTests(unittest.TestCase):
         catalog = FakeCatalog({"offer-1": offer_and_item()})
         commerce = FakeCommerce()
         with (
-            patch.dict(os.environ, {"ENVIRONMENT_NAME": "prod"}),
+            patch.dict(os.environ, {"ENVIRONMENT_NAME": "production"}),
             patch.object(checkout, "resolve_checkout_policy", return_value=policies),
             patch.object(checkout, "_catalog_store", return_value=catalog),
             patch.object(checkout, "_commerce_store", return_value=commerce),

@@ -7,7 +7,7 @@ from typing import Any
 
 try:
     from catalog_storage import CatalogStore
-    from common.auth_admin import authorize_request
+    from common.auth_admin import authorize_request, require_session_cookie
     from common.http import (
         bounded_page_size,
         catalog_cursor_signing_key,
@@ -25,7 +25,7 @@ try:
     from common.published_policy import resolve_policies
 except ModuleNotFoundError:
     from src.catalog_storage import CatalogStore
-    from src.common.auth_admin import authorize_request
+    from src.common.auth_admin import authorize_request, require_session_cookie
     from src.common.http import (
         bounded_page_size,
         catalog_cursor_signing_key,
@@ -69,6 +69,7 @@ def _handle(event: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         input_value = closed_object(request["input"], {"resourceId"})
         safe_id(input_value["resourceId"])
 
+    require_session_cookie(event)
     policies = resolve_policies(domain_header(event))
     commerce = validated_commerce(policies)
     currencies = supported_currencies(commerce)

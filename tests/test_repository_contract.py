@@ -35,9 +35,9 @@ class RepositoryContractTests(unittest.TestCase):
         )
 
         config = tomllib.loads((ROOT / "samconfig.toml").read_text(encoding="utf-8"))
-        self.assertEqual(set(config), {"version", "test", "prod"})
+        self.assertEqual(set(config), {"version", "test", "production"})
         self.assertEqual(config["test"]["deploy"]["parameters"]["parameter_overrides"], ["EnvironmentName=test"])
-        self.assertEqual(config["prod"]["deploy"]["parameters"]["parameter_overrides"], ["EnvironmentName=prod"])
+        self.assertEqual(config["production"]["deploy"]["parameters"]["parameter_overrides"], ["EnvironmentName=production"])
 
     def test_template_and_ci_pin_the_approved_python_and_sam_versions(self):
         template = (ROOT / "template.yaml").read_text(encoding="utf-8")
@@ -45,7 +45,7 @@ class RepositoryContractTests(unittest.TestCase):
 
         self.assertIn("Transform: AWS::Serverless-2016-10-31", template)
         self.assertIn("Runtime: python3.13", template)
-        self.assertRegex(template, re.compile(r"AllowedValues:\s*\n\s*- test\s*\n\s*- prod"))
+        self.assertRegex(template, re.compile(r"AllowedValues:\s*\n\s*- test\s*\n\s*- production"))
         self.assertNotIn("dev", (ROOT / "samconfig.toml").read_text(encoding="utf-8").lower())
         self.assertIn("python-version: '3.13'", ci)
         self.assertIn("PyYAML==6.0.2", ci)
@@ -56,25 +56,17 @@ class RepositoryContractTests(unittest.TestCase):
     def test_external_resource_parameters_are_bounded_and_injection_safe(self):
         parameters = load_template()["Parameters"]
         for name in (
+            "IntegrationsApiId",
             "ConfigRegistryTableName",
+            "ConfigPayloadsBucketName",
             "AuthSessionTableName",
             "AuthUserStateTableName",
+            "IntegrationEventsTopicArn",
         ):
             parameter = parameters[name]
-            self.assertEqual(parameter["MinLength"], "3")
-            self.assertEqual(parameter["MaxLength"], "255")
-            self.assertEqual(parameter["AllowedPattern"], "^[A-Za-z0-9_.-]+$")
-
-        bucket = parameters["ConfigPayloadsBucketName"]
-        self.assertEqual(bucket["MinLength"], "3")
-        self.assertEqual(bucket["MaxLength"], "63")
-        self.assertEqual(bucket["AllowedPattern"], "^[a-z0-9][a-z0-9.-]*[a-z0-9]$")
-
-        integrations_api = parameters["IntegrationsApiId"]
-        self.assertEqual(integrations_api["MinLength"], "10")
-        self.assertEqual(integrations_api["MaxLength"], "10")
-        self.assertEqual(integrations_api["AllowedPattern"], "^[a-z0-9]{10}$")
-        self.assertNotIn("Default", integrations_api)
+            self.assertEqual(parameter["Type"], "AWS::SSM::Parameter::Value<String>")
+            self.assertNotIn("Default", parameter)
+            self.assertNotIn("NoEcho", parameter)
 
         for name in ("FiscalRetentionApprovalId", "FiscalAccessApprovalId"):
             parameter = parameters[name]
@@ -86,7 +78,7 @@ class RepositoryContractTests(unittest.TestCase):
 
         cursor_key = parameters.get("CommerceCursorSigningKey", {})
         self.assertEqual(cursor_key.get("NoEcho"), "true")
-        self.assertEqual(cursor_key.get("MinLength"), "32")
+        self.assertEqual(cursor_key.get("MinLength"), "43")
         self.assertEqual(cursor_key.get("MaxLength"), "128")
         cursor_key_pattern = (
             r"^(?:[A-Za-z0-9_-]{4})*"
@@ -94,7 +86,7 @@ class RepositoryContractTests(unittest.TestCase):
         )
         self.assertEqual(cursor_key.get("AllowedPattern"), cursor_key_pattern)
         compiled_cursor_key_pattern = re.compile(cursor_key_pattern, re.ASCII)
-        for accepted in ("A" * 32, "A" * 34, "A" * 35, "_" * 128):
+        for accepted in ("A" * 43, "A" * 44, "A" * 46, "_" * 128):
             with self.subTest(accepted=accepted):
                 self.assertIsNotNone(compiled_cursor_key_pattern.fullmatch(accepted))
         for rejected in ("A" * 33, "A" * 33 + "B", "A" * 34 + "B"):
@@ -283,7 +275,7 @@ class RepositoryContractTests(unittest.TestCase):
         schedule_events = resources["ReservationReconcilerFunction"]["Properties"]["Events"]
         schedule = next(event for event in schedule_events.values() if event["Type"] == "Schedule")
         self.assertEqual(schedule["Properties"]["Schedule"], "rate(5 minutes)")
-        self.assertEqual(schedule["Properties"]["Enabled"], "false")
+        self.assertEqual(schedule["Properties"]["Enabled"], "true")
         reconciler = str(resources.get("ReservationReconcilerRole", {}))
         self.assertIn("ReservationDueIndex", reconciler)
         self.assertIn("dynamodb:Query", reconciler)

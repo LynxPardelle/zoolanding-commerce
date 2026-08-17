@@ -1,5 +1,8 @@
 from pathlib import Path
+import os
 import re
+import subprocess
+import sys
 
 import yaml
 from samtranslator.translator.transform import transform
@@ -15,6 +18,11 @@ class _NoManagedPolicies:
 
 def main():
     source = yaml.safe_load((ROOT / "template.yaml").read_text(encoding="utf-8"))
+    function_handlers = {
+        logical_id: resource["Properties"]["Handler"]
+        for logical_id, resource in source["Resources"].items()
+        if resource["Type"] == "AWS::Serverless::Function"
+    }
     for logical_id, resource in source["Resources"].items():
         if resource["Type"] == "AWS::Serverless::Function":
             resource["Properties"]["CodeUri"] = f"s3://sam-transform-check/{logical_id}.zip"
@@ -28,6 +36,8 @@ def main():
             "AuthUserStateTableName": "zoolanding-auth-users-test",
             "IntegrationEventsTopicArn": "arn:aws:sns:us-east-1:111122223333:zoolanding-events-test",
             "IntegrationsApiId": "abcdefghij",
+            "CommerceCursorSigningKey": "A" * 43,
+            "AlarmTopicArn": "arn:aws:sns:us-east-1:111122223333:operator-alarms-test",
             "FiscalProductionApproved": "false",
             "FiscalRetentionApprovalId": "",
             "FiscalAccessApprovalId": "",
@@ -164,13 +174,26 @@ def main():
         if resource["Type"] == "AWS::Lambda::Function":
             assert "TracingConfig" not in resource["Properties"]
 
-    functions = [
-        logical_id
-        for logical_id, resource in source["Resources"].items()
-        if resource["Type"] == "AWS::Serverless::Function"
-    ]
+    functions = list(function_handlers)
+    build_root = ROOT / ".aws-sam" / "build"
+    safe_environment = os.environ.copy()
+    for key in (
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_SECURITY_TOKEN",
+        "AWS_PROFILE",
+        "AWS_DEFAULT_PROFILE",
+        "AWS_WEB_IDENTITY_TOKEN_FILE",
+        "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+        "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    ):
+        safe_environment.pop(key, None)
+    safe_environment["AWS_EC2_METADATA_DISABLED"] = "true"
+
     for logical_id in functions:
-        packaged_boto3 = ROOT / ".aws-sam" / "build" / logical_id / "boto3" / "__init__.py"
+        packaged_root = build_root / logical_id
+        packaged_boto3 = packaged_root / "boto3" / "__init__.py"
         assert packaged_boto3.is_file(), f"boto3 was not packaged for {logical_id}"
         match = re.search(
             r"^__version__\s*=\s*['\"]([^'\"]+)",
@@ -179,7 +202,36 @@ def main():
         )
         assert match is not None and match.group(1) == "1.39.13", logical_id
 
-    print(f"verified {len(functions)} packaged functions")
+        handler = function_handlers[logical_id]
+        module_name, attribute_name = handler.rsplit(".", 1)
+        import_environment = safe_environment.copy()
+        import_environment["PYTHONPATH"] = str(packaged_root)
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import importlib,sys;"
+                    "sys.path.insert(0,sys.argv[3]);"
+                    "module=importlib.import_module(sys.argv[1]);"
+                    "assert callable(getattr(module,sys.argv[2]))"
+                ),
+                module_name,
+                attribute_name,
+                str(packaged_root),
+            ],
+            cwd=packaged_root,
+            env=import_environment,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        assert completed.returncode == 0, (
+            f"built handler import failed for {logical_id}: {completed.stderr.strip()}"
+        )
+
+    print(f"verified {len(functions)} packaged and importable functions")
     for role_id, actions in expected_actions.items():
         print(f"{role_id}: {', '.join(sorted(actions))}")
 

@@ -177,6 +177,58 @@ class DomainTests(unittest.TestCase):
             with self.subTest(quantity=invalid_quantity), self.assertRaises(ValueError):
                 orders.CheckoutLine("line-1", "offer-v1", invalid_quantity, unit_price)
 
+    def test_tracked_checkout_lines_have_a_conservative_public_hold_limit(self):
+        from src.domain import orders
+
+        unit_price = offers.Money(1, "MXN", frozenset({"MXN"}))
+        untracked = orders.CheckoutLine(
+            "line-untracked",
+            "offer-untracked",
+            orders.MAX_CHECKOUT_LINE_QUANTITY,
+            unit_price,
+        )
+        tracked = orders.CheckoutLine(
+            "line-tracked",
+            "offer-tracked",
+            orders.MAX_TRACKED_CHECKOUT_LINE_QUANTITY,
+            unit_price,
+            "stock-tracked",
+        )
+
+        self.assertEqual(untracked.quantity, orders.MAX_CHECKOUT_LINE_QUANTITY)
+        self.assertEqual(tracked.quantity, orders.MAX_TRACKED_CHECKOUT_LINE_QUANTITY)
+        with self.assertRaisesRegex(ValueError, "tracked checkout line quantity"):
+            orders.CheckoutLine(
+                "line-over-limit",
+                "offer-over-limit",
+                orders.MAX_TRACKED_CHECKOUT_LINE_QUANTITY + 1,
+                unit_price,
+                "stock-tracked",
+            )
+
+        accepted_tracked_order = orders.PendingOrder(
+            "order-at-limit",
+            "attempt-at-limit",
+            (
+                orders.CheckoutLine("line-a", "offer-a", 10, unit_price, "stock-a"),
+                orders.CheckoutLine("line-b", "offer-b", 10, unit_price, "stock-b"),
+            ),
+        )
+        self.assertEqual(
+            sum(line.quantity for line in accepted_tracked_order.lines),
+            orders.MAX_TRACKED_CHECKOUT_TOTAL_QUANTITY,
+        )
+        with self.assertRaisesRegex(ValueError, "total tracked checkout quantity"):
+            orders.PendingOrder(
+                "order-over-limit",
+                "attempt-over-limit",
+                (
+                    orders.CheckoutLine("line-c", "offer-c", 10, unit_price, "stock-c"),
+                    orders.CheckoutLine("line-d", "offer-d", 10, unit_price, "stock-d"),
+                    orders.CheckoutLine("line-e", "offer-e", 1, unit_price, "stock-e"),
+                ),
+            )
+
     def test_catalog_items_keep_variants_and_data_space_references_deeply_immutable(self):
         reference = catalog.DataSpaceRecordReference(
             space_id="products",

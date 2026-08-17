@@ -9,6 +9,8 @@ from .offers import Money
 
 MAX_CHECKOUT_LINES = 20
 MAX_CHECKOUT_LINE_QUANTITY = 1_000_000
+MAX_TRACKED_CHECKOUT_LINE_QUANTITY = 10
+MAX_TRACKED_CHECKOUT_TOTAL_QUANTITY = 20
 _SAFE_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}", re.ASCII)
 
 
@@ -53,6 +55,8 @@ class CheckoutLine:
             raise ValueError("unit_price must be immutable Money")
         if self.stock_id is not None:
             _safe_id(self.stock_id, "stock_id")
+            if self.quantity > MAX_TRACKED_CHECKOUT_LINE_QUANTITY:
+                raise ValueError("tracked checkout line quantity exceeds the public hold limit")
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +72,11 @@ class PendingOrder:
             raise ValueError("lines must be a tuple containing 1 to 20 entries")
         if any(type(line) is not CheckoutLine for line in self.lines):
             raise ValueError("lines must contain immutable CheckoutLine values")
+        if (
+            sum(line.quantity for line in self.lines if line.stock_id is not None)
+            > MAX_TRACKED_CHECKOUT_TOTAL_QUANTITY
+        ):
+            raise ValueError("total tracked checkout quantity exceeds the public hold limit")
         line_ids = [line.line_id for line in self.lines]
         if len(set(line_ids)) != len(line_ids):
             raise ValueError("line_id values must be unique")

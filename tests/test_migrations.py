@@ -112,6 +112,7 @@ def _event(operation: str, input_value: dict, *, idempotency_key: str = "migrati
         "headers": {
             "X-ZLP-Domain": DOMAIN,
             "X-ZLP-Auth-Profile-Id": "staff",
+            "Cookie": "__Host-zlp_session=session-value",
             "Idempotency-Key": idempotency_key,
         },
         "body": json.dumps({"operation": operation, "input": input_value}),
@@ -2641,7 +2642,7 @@ class MigrationGatewayTests(unittest.TestCase):
         self.assertEqual(result, canceled)
 
     @patch.dict(os.environ, {
-        "ENVIRONMENT_NAME": "prod",
+        "ENVIRONMENT_NAME": "production",
         "INTEGRATIONS_API_ID": "abcdefghij",
         "AWS_REGION": "us-east-1",
     }, clear=True)

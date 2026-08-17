@@ -7,7 +7,7 @@ import time
 from typing import Any
 
 try:
-    from common.auth_admin import authorize_request
+    from common.auth_admin import authorize_request, require_session_cookie
     from common.http import (
         HttpError,
         closed_object,
@@ -23,7 +23,7 @@ try:
     from common.published_policy import resolve_policies
     from storage import CommerceStore
 except ModuleNotFoundError:
-    from src.common.auth_admin import authorize_request
+    from src.common.auth_admin import authorize_request, require_session_cookie
     from src.common.http import (
         HttpError,
         closed_object,
@@ -60,6 +60,7 @@ def _handle(event: dict[str, Any], payload: dict[str, Any], request_id: str) -> 
     expected_revision = nonnegative_int(input_value["expectedRevision"])
     idempotency_key = idempotency_header(event)
 
+    require_session_cookie(event)
     policies = resolve_policies(domain_header(event))
     commerce = validated_commerce(policies)
     inventory = commerce.get("inventory")
