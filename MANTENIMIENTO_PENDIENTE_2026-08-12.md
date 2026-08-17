@@ -1,23 +1,26 @@
-# Mantenimiento pendiente — 2026-08-12
+# Mantenimiento del repositorio — actualizado 2026-08-17
 
-## Publicación bloqueada de forma segura
+## Publicación y automatización
 
-Este repositorio no tiene ningún remoto configurado. El código y sus ramas se
-conservaron localmente; no se inventó un destino, propietario o visibilidad.
+- Origen canónico privado: `https://github.com/LynxPardelle/zoolanding-commerce`.
+- Ramas base publicadas: `main`, `test` y `dev`; promoción `dev -> test -> main`.
+- CI valida cada push y pull request con permisos de lectura. Los Environments
+  restringen `test` a la rama `test` y `production` a `main`.
+- Roles OIDC/CloudFormation y topic de alarmas están configurados sin claves AWS
+  estáticas. Cada Environment tiene una clave de cursor aleatoria y distinta;
+  GitHub sólo expone su metadata, no su valor.
+- Validación local: 283/283 pruebas, compilación, SAM, Actionlint y Gitleaks.
 
-- Destino candidato, sujeto a aprobación: `LynxPardelle/zoolanding-commerce`.
-- Visibilidad recomendada hasta revisar arquitectura y rollout: **privada**.
-- Rama actual: `codex/phase8-infrastructure-readiness`.
-- Validación local: 283/283 pruebas, compilación Python y
-  `sam validate --lint` correctos.
-- Despliegue: **NO-GO**; el propio contrato del servicio declara esta fase
-  local y exige gates posteriores. No se llamó AWS ni un proveedor.
+## Despliegue pendiente
 
-Cuando exista un repositorio aprobado, configure `origin` únicamente con la URL
-confirmada y publique primero esta rama de trabajo con un push normal. Después
-revise las ramas históricas y promueva mediante `dev -> test -> main`; no fuerce
-historia ni publique directamente una rama protegida.
+**NO-GO para desplegar la aplicación.** Sólo existen las identidades retenidas.
+Faltan el stack Commerce, parámetros SSM canónicos y servicios Integrations
+publicados; el topic de alarmas tiene cero suscriptores confirmados. Los gates
+fiscales, de pago y de aceptación siguen cerrados.
 
-Antes de transferir este repositorio, excluya `.env`, credenciales, payloads de
-proveedor, datos fiscales/PII, resultados de SAM y entornos virtuales. Ninguno de
-esos materiales debe entrar en Git ni en el paquete de código compartido.
+La protección de ramas privadas no está incluida en el plan GitHub actual. No
+se hizo público el código para eludir esa restricción. Use pull requests, CI y
+pushes normales; nunca fuerce historia.
+
+No transfiera `.env`, claves de firma, datos de pago/fiscales, PII, payloads de
+proveedor, `.aws-sam`, cachés ni entornos virtuales. Clone el código desde GitHub.
