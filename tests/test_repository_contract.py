@@ -275,7 +275,7 @@ class RepositoryContractTests(unittest.TestCase):
         schedule_events = resources["ReservationReconcilerFunction"]["Properties"]["Events"]
         schedule = next(event for event in schedule_events.values() if event["Type"] == "Schedule")
         self.assertEqual(schedule["Properties"]["Schedule"], "rate(5 minutes)")
-        self.assertEqual(schedule["Properties"]["Enabled"], "false")
+        self.assertEqual(schedule["Properties"]["Enabled"], "true")
         reconciler = str(resources.get("ReservationReconcilerRole", {}))
         self.assertIn("ReservationDueIndex", reconciler)
         self.assertIn("dynamodb:Query", reconciler)

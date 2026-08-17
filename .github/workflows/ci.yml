@@ -7,9 +7,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: commerce-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   guard:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Enforce protected promotion graph
         shell: bash
@@ -28,6 +33,7 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: guard
     env:
       AWS_DEFAULT_REGION: us-east-1
@@ -38,7 +44,12 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
+      - name: Scan current tree and history for secrets
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Verify exact clean commit
         shell: bash
         env:

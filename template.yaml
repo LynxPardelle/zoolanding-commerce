@@ -123,12 +123,37 @@ Resources:
           ThrottlingRateLimit: 25
           ThrottlingBurstLimit: 50
         - HttpMethod: POST
-          ResourcePath: /~1features~1commerce~1public-action
+          ResourcePath: /~1features~1commerce~1read
           MetricsEnabled: true
           ThrottlingRateLimit: 10
           ThrottlingBurstLimit: 20
         - HttpMethod: POST
+          ResourcePath: /~1features~1commerce~1catalog~1action
+          MetricsEnabled: true
+          ThrottlingRateLimit: 5
+          ThrottlingBurstLimit: 10
+        - HttpMethod: POST
+          ResourcePath: /~1features~1commerce~1inventory~1action
+          MetricsEnabled: true
+          ThrottlingRateLimit: 5
+          ThrottlingBurstLimit: 10
+        - HttpMethod: POST
+          ResourcePath: /~1features~1commerce~1public-action
+          MetricsEnabled: true
+          ThrottlingRateLimit: 2
+          ThrottlingBurstLimit: 4
+        - HttpMethod: POST
+          ResourcePath: /~1features~1commerce~1subscription~1action
+          MetricsEnabled: true
+          ThrottlingRateLimit: 5
+          ThrottlingBurstLimit: 10
+        - HttpMethod: POST
           ResourcePath: /~1features~1commerce~1fiscal~1request
+          MetricsEnabled: true
+          ThrottlingRateLimit: 5
+          ThrottlingBurstLimit: 10
+        - HttpMethod: POST
+          ResourcePath: /~1features~1commerce~1fiscal~1admin
           MetricsEnabled: true
           ThrottlingRateLimit: 5
           ThrottlingBurstLimit: 10
@@ -1509,7 +1534,7 @@ Resources:
           Type: Schedule
           Properties:
             Schedule: rate(5 minutes)
-            Enabled: false
+            Enabled: true
 
   Api5xxAlarm:
     Type: AWS::CloudWatch::Alarm

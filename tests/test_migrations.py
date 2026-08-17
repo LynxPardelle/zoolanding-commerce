@@ -112,6 +112,7 @@ def _event(operation: str, input_value: dict, *, idempotency_key: str = "migrati
         "headers": {
             "X-ZLP-Domain": DOMAIN,
             "X-ZLP-Auth-Profile-Id": "staff",
+            "Cookie": "__Host-zlp_session=session-value",
             "Idempotency-Key": idempotency_key,
         },
         "body": json.dumps({"operation": operation, "input": input_value}),

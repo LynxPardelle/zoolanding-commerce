@@ -113,6 +113,7 @@ def api_event(
         "headers": {
             "X-ZLP-Domain": DOMAIN,
             "X-ZLP-Auth-Profile-Id": "staff",
+            "Cookie": "__Host-zlp_session=session-value",
             "Idempotency-Key": idempotency_key,
         },
         "body": json.dumps(payload, separators=(",", ":")),
@@ -197,6 +198,18 @@ class SubscriptionBoundaryTests(unittest.TestCase):
             self.command_backend,
             OPERATIONS_TABLE,
         )
+
+    def test_missing_session_is_rejected_before_published_policy_io(self):
+        request = api_event({
+            "operation": "pause",
+            "input": {"subscriptionId": "subscription-1", "expectedRevision": 1},
+        })
+        request["headers"].pop("Cookie")
+        with patch.object(subscription_action, "resolve_policies") as resolver:
+            response = subscription_action.lambda_handler(request, None)
+
+        self.assertEqual(response["statusCode"], 401)
+        resolver.assert_not_called()
 
     def call(
         self,

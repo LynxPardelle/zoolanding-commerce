@@ -8,7 +8,7 @@ from typing import Any
 
 try:
     from catalog_storage import CatalogStore
-    from common.auth_admin import authorize_request
+    from common.auth_admin import authorize_request, require_session_cookie
     from common.http import (
         HttpError,
         closed_object,
@@ -34,7 +34,7 @@ try:
     )
 except ModuleNotFoundError:
     from src.catalog_storage import CatalogStore
-    from src.common.auth_admin import authorize_request
+    from src.common.auth_admin import authorize_request, require_session_cookie
     from src.common.http import (
         HttpError,
         closed_object,
@@ -85,6 +85,7 @@ def _handle(event: dict[str, Any], payload: dict[str, Any], request_id: str) -> 
     input_value = _validated_input(operation, request["input"])
     idempotency_key = idempotency_header(event)
 
+    require_session_cookie(event)
     policies = resolve_policies(domain_header(event))
     commerce = validated_commerce(policies)
     currencies = supported_currencies(commerce)

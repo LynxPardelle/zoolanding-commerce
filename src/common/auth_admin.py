@@ -60,6 +60,13 @@ class AuthorizedContext:
     session: dict[str, Any]
 
 
+def require_session_cookie(event: dict[str, Any]) -> None:
+    """Reject anonymous requests before published-policy or storage I/O."""
+
+    if not _cookie_value(event, SESSION_COOKIE_NAME):
+        raise AuthenticationError("Authentication required")
+
+
 class DynamoAuthStore:
     def __init__(self, session_table_name: str, user_table_name: str, dynamodb: Any = None):
         if not session_table_name or not user_table_name:

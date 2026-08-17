@@ -208,14 +208,49 @@ class Phase8InfrastructureTests(unittest.TestCase):
                 },
                 {
                     "HttpMethod": "POST",
-                    "ResourcePath": "/~1features~1commerce~1public-action",
+                    "ResourcePath": "/~1features~1commerce~1read",
                     "MetricsEnabled": True,
                     "ThrottlingRateLimit": 10,
                     "ThrottlingBurstLimit": 20,
                 },
                 {
                     "HttpMethod": "POST",
+                    "ResourcePath": "/~1features~1commerce~1catalog~1action",
+                    "MetricsEnabled": True,
+                    "ThrottlingRateLimit": 5,
+                    "ThrottlingBurstLimit": 10,
+                },
+                {
+                    "HttpMethod": "POST",
+                    "ResourcePath": "/~1features~1commerce~1inventory~1action",
+                    "MetricsEnabled": True,
+                    "ThrottlingRateLimit": 5,
+                    "ThrottlingBurstLimit": 10,
+                },
+                {
+                    "HttpMethod": "POST",
+                    "ResourcePath": "/~1features~1commerce~1public-action",
+                    "MetricsEnabled": True,
+                    "ThrottlingRateLimit": 2,
+                    "ThrottlingBurstLimit": 4,
+                },
+                {
+                    "HttpMethod": "POST",
+                    "ResourcePath": "/~1features~1commerce~1subscription~1action",
+                    "MetricsEnabled": True,
+                    "ThrottlingRateLimit": 5,
+                    "ThrottlingBurstLimit": 10,
+                },
+                {
+                    "HttpMethod": "POST",
                     "ResourcePath": "/~1features~1commerce~1fiscal~1request",
+                    "MetricsEnabled": True,
+                    "ThrottlingRateLimit": 5,
+                    "ThrottlingBurstLimit": 10,
+                },
+                {
+                    "HttpMethod": "POST",
+                    "ResourcePath": "/~1features~1commerce~1fiscal~1admin",
                     "MetricsEnabled": True,
                     "ThrottlingRateLimit": 5,
                     "ThrottlingBurstLimit": 10,
@@ -265,6 +300,15 @@ class Phase8InfrastructureTests(unittest.TestCase):
         ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
         self.assertRegex(ci, r"(?m)^on:\n  push:\s*$\n  pull_request:\s*$")
         self.assertNotIn("id-token: write", ci)
+        self.assertIn("group: commerce-ci-${{ github.workflow }}-${{ github.ref }}", ci)
+        self.assertIn("cancel-in-progress: true", ci)
+        self.assertIn("timeout-minutes: 5", ci)
+        self.assertIn("timeout-minutes: 30", ci)
+        self.assertIn("fetch-depth: 0", ci)
+        self.assertIn(
+            "gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7",
+            ci,
+        )
         self.assertIn("Enforce protected promotion graph", ci)
         self.assertIn("python -m unittest discover", ci)
         self.assertIn("sam build --no-cached", ci)
@@ -279,6 +323,19 @@ class Phase8InfrastructureTests(unittest.TestCase):
             self.assertIn(f"SOURCE_BRANCH: {source}", text)
             self.assertIn(f"TARGET_BRANCH: {branch}", text)
             self.assertIn(f"environment: {environment}", text)
+            deploy_start = text.index("\n  deploy:")
+            deploy_steps = text.index("\n    steps:", deploy_start)
+            self.assertNotIn("${{ vars.", text)
+            self.assertNotIn("${{ secrets.", text[deploy_start:deploy_steps])
+            for secret_name in (
+                "AWS_ROLE_ARN",
+                "AWS_CLOUDFORMATION_ROLE_ARN",
+                "ALARM_TOPIC_ARN",
+                "COMMERCE_CURSOR_SIGNING_KEY",
+            ):
+                self.assertIn(f"${{{{ secrets.{secret_name} }}}}", text)
+            self.assertIn("mask-aws-account-id: true", text)
+            self.assertEqual(text.count("timeout-minutes: 30"), 2)
             self.assertEqual(text.count("id-token: write"), 1)
             self.assertIn("actions/upload-artifact@", text)
             self.assertIn("actions/download-artifact@", text)

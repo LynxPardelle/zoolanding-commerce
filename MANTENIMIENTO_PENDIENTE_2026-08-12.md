@@ -6,10 +6,14 @@
 - Ramas base publicadas: `main`, `test` y `dev`; promoción `dev -> test -> main`.
 - CI valida cada push y pull request con permisos de lectura. Los Environments
   restringen `test` a la rama `test` y `production` a `main`.
-- Roles OIDC/CloudFormation y topic de alarmas están configurados sin claves AWS
-  estáticas. Cada Environment tiene una clave de cursor aleatoria y distinta;
-  GitHub sólo expone su metadata, no su valor.
-- Validación local: 283/283 pruebas, compilación, SAM, Actionlint y Gitleaks.
+- Roles OIDC/CloudFormation, topic de alarmas y clave de cursor se consumen sólo
+  como secretos del Environment y sólo en los pasos que los necesitan. No hay
+  claves AWS estáticas ni valores de configuración operativa en el repositorio.
+- Validación local: 287/287 pruebas (tres pases), compilación, `pip-audit`, SAM
+  lint/build, verificación de 11 funciones empaquetadas, Actionlint y Gitleaks.
+- La defensa local limita inventario rastreado a 10 unidades por línea y 20 por
+  checkout, reduce el throttle público a 2 rps/burst 4, habilita reconciliación
+  programada y autentica rutas protegidas antes de resolver políticas.
 
 ## Despliegue pendiente
 
@@ -17,6 +21,11 @@
 Faltan el stack Commerce, parámetros SSM canónicos y servicios Integrations
 publicados; el topic de alarmas tiene cero suscriptores confirmados. Los gates
 fiscales, de pago y de aceptación siguen cerrados.
+
+La defensa local reduce, pero no elimina, el bloqueo distribuido de inventario:
+un actor puede rotar claves de recuperación y origen de red. Antes de activar
+checkout con inventario rastreado se requiere admisión externa breve, presupuesto
+atómico por actor/identidad y controles edge por IP con evidencia de pruebas.
 
 La protección de ramas privadas no está incluida en el plan GitHub actual. No
 se hizo público el código para eludir esa restricción. Use pull requests, CI y
