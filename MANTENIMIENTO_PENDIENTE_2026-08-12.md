@@ -13,7 +13,7 @@
   después de que el commit que consume los secretos completó CI en GitHub.
 - `dev`, `test` y `main` exigen PR y CI estricto, incluyen a administradores,
   resuelven conversaciones y bloquean force-push y borrado. Secret scanning,
-  push protection, patrones no-proveedor y validación de credenciales están activos.
+  push protection y actualizaciones de seguridad de Dependabot están activos.
 - Validación local: 287/287 pruebas (tres pases), compilación, `pip-audit`, SAM
   lint/build, verificación de 11 funciones empaquetadas, Actionlint y Gitleaks.
 - La defensa local limita inventario rastreado a 10 unidades por línea y 20 por
