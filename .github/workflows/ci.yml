@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: commerce-ci-${{ github.workflow }}-${{ github.ref }}

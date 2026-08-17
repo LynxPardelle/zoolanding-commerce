@@ -300,6 +300,10 @@ class Phase8InfrastructureTests(unittest.TestCase):
         ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
         self.assertRegex(ci, r"(?m)^on:\n  push:\s*$\n  pull_request:\s*$")
         self.assertNotIn("id-token: write", ci)
+        self.assertRegex(
+            ci,
+            r"(?m)^permissions:\n  contents: read\n  pull-requests: read$",
+        )
         self.assertIn("group: commerce-ci-${{ github.workflow }}-${{ github.ref }}", ci)
         self.assertIn("cancel-in-progress: true", ci)
         self.assertIn("timeout-minutes: 5", ci)

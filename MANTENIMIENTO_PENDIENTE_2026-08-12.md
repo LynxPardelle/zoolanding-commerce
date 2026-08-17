@@ -9,6 +9,8 @@
 - Roles OIDC/CloudFormation, topic de alarmas y clave de cursor se consumen sólo
   como secretos del Environment y sólo en los pasos que los necesitan. No hay
   claves AWS estáticas ni valores de configuración operativa en el repositorio.
+- Las antiguas variables duplicadas de `test` y `production` se retiraron sólo
+  después de que el commit que consume los secretos completó CI en GitHub.
 - Validación local: 287/287 pruebas (tres pases), compilación, `pip-audit`, SAM
   lint/build, verificación de 11 funciones empaquetadas, Actionlint y Gitleaks.
 - La defensa local limita inventario rastreado a 10 unidades por línea y 20 por
