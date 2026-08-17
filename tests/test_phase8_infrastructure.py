@@ -313,6 +313,14 @@ class Phase8InfrastructureTests(unittest.TestCase):
         self.assertIn("python -m unittest discover", ci)
         self.assertIn("sam build --no-cached", ci)
         self.assertIn("python tests/verify_sam_build.py", ci)
+        self.assertLess(
+            ci.index("Verify exact clean commit"),
+            ci.index("Scan current tree and history for secrets"),
+        )
+        self.assertLess(
+            ci.index("Validate exact SAM build"),
+            ci.index("Scan current tree and history for secrets"),
+        )
 
         for filename, branch, source, environment in (
             ("deploy-test.yml", "test", "dev", "test"),

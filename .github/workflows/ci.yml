@@ -46,10 +46,6 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Scan current tree and history for secrets
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Verify exact clean commit
         shell: bash
         env:
@@ -82,3 +78,7 @@ jobs:
           sam build --no-cached
           test -f .aws-sam/build/template.yaml
           python tests/verify_sam_build.py
+      - name: Scan current tree and history for secrets
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
